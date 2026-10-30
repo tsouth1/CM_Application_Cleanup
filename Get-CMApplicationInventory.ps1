@@ -27,7 +27,9 @@
     Outputs written to -OutputDirectory:
       Applications_<timestamp>.csv            one row per application
       DeploymentTypes_<timestamp>.csv         one row per deployment type
-      TaskSequenceReferences_<timestamp>.csv  one row per task sequence and application pair
+      TaskSequenceReferences_<timestamp>.csv  one row per task sequence and application pair;
+                                              TaskSequenceDeployments counts deployments of the
+                                              task sequence, Deployments those of the application
 
     The application rows are also written to the pipeline.
 
@@ -312,6 +314,29 @@ JOIN v_TaskSequencePackage ts ON ts.PackageID = r.PackageID
     }
 }
 
+function Get-TaskSequenceDeploymentCounts {
+    # Returns a table of task sequence PackageID to its number of deployments. A task sequence
+    # deployment is an advertisement of the task sequence package. Task sequences with no
+    # deployments have no entry. Returns $null when the deployments cannot be read.
+    $query = @'
+SELECT adv.PackageID, COUNT(*) AS Deployments
+FROM v_Advertisement adv
+JOIN v_TaskSequencePackage ts ON ts.PackageID = adv.PackageID
+GROUP BY adv.PackageID
+'@
+    try {
+        $rows = (Invoke-SqlQuery -Query $query).Rows
+    }
+    catch {
+        Write-Log "Could not read task sequence deployments, TaskSequenceDeployments will be blank: $($_.Exception.Message)" 'WARN'
+        return $null
+    }
+
+    $counts = @{}
+    foreach ($row in $rows) { $counts[$row.PackageID] = [int]$row.Deployments }
+    return $counts
+}
+
 #endregion
 
 #region Main
@@ -345,6 +370,9 @@ foreach ($reference in $references) {
     if (-not $referencesByModel.ContainsKey($reference.ModelName)) { $referencesByModel[$reference.ModelName] = @() }
     $referencesByModel[$reference.ModelName] += $reference
 }
+
+Write-Log 'Reading task sequence deployments'
+$tsDeploymentCounts = Get-TaskSequenceDeploymentCounts
 
 Write-Log 'Reading deployment types'
 $deploymentTypesByModel = Get-DeploymentTypes
@@ -429,13 +457,16 @@ $referenceRows = foreach ($reference in $references) {
     $app = if ($reference.ModelName) { $appsByModel[$reference.ModelName] } else { $null }
 
     [pscustomobject]@{
-        TaskSequenceName = $reference.TaskSequenceName
-        TaskSequenceID   = $reference.TaskSequenceID
-        Application      = if ($app) { $app.Application } else { '(application not found)' }
-        Status           = if ($app) { $app.Status } else { '' }
-        Deployments      = if ($app) { $app.Deployments } else { $null }
-        AllowTSInstall   = if ($app) { $app.AllowTSInstall } else { $null }
-        ModelName        = $reference.ModelName
+        TaskSequenceName        = $reference.TaskSequenceName
+        TaskSequenceID          = $reference.TaskSequenceID
+        # Deployments of the task sequence itself; Deployments below is the application's
+        TaskSequenceDeployments = if ($null -eq $tsDeploymentCounts) { $null }
+                                  else { [int]$tsDeploymentCounts[$reference.TaskSequenceID] }
+        Application             = if ($app) { $app.Application } else { '(application not found)' }
+        Status                  = if ($app) { $app.Status } else { '' }
+        Deployments             = if ($app) { $app.Deployments } else { $null }
+        AllowTSInstall          = if ($app) { $app.AllowTSInstall } else { $null }
+        ModelName               = $reference.ModelName
     }
 }
 

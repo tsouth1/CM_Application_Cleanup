@@ -32,7 +32,7 @@ Written to `-OutputDirectory` (default `.\AppInventory`):
 
 - `Applications_<timestamp>.csv` - one row per application
 - `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location and install and uninstall commands
-- `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair
+- `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair. `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the application, the same value as in the applications report
 
 A report with no rows is still written as an empty file, so every path in the log exists.
 
