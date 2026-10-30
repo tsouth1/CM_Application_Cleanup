@@ -63,6 +63,6 @@ $apps | Where-Object { $_.Status -eq 'Retired' -and $_.TaskSequenceCount } |
 
 ### Limitations
 
-- Only direct task sequence references are listed. An application installed by a child task sequence appears against the child only.
+- An application installed by a child task sequence is listed against both the child and the parent, one level deep. Deeper nesting is not followed.
 - Applications installed from a dynamic variable list (Install Application step using a base variable name) are not detected as references.
 - The script is read-only; it does not change or delete anything in ConfigMgr.

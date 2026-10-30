@@ -17,10 +17,12 @@
       DependentDTs         Deployment types of other applications that depend on it
       ObjectPath           Console folder holding the application, e.g. /Software/Adobe (/ is the root)
 
-    Deployment types, content locations, install commands and AllowTSInstall are read from the
-    application's SDMPackageDigest XML, the same XML Get-CMApplication returns as SDMPackageXML.
-    Task sequence references come from v_TaskSequenceAppReferencesInfo, the table ConfigMgr
-    keeps up to date for every Install Application step.
+    AllowTSInstall and the deployment type priority order are read from the application's
+    SDMPackageDigest XML. Content locations and command lines are read from the
+    SDMPackageDigest of each deployment type, which ConfigMgr stores as a separate CI.
+    Task sequence references come from v_TS_AppReferences_Flat, which ConfigMgr keeps up to
+    date for every Install Application step and which, unlike v_TaskSequenceAppReferencesInfo,
+    includes retired applications.
 
     Outputs written to -OutputDirectory:
       Applications_<timestamp>.csv            one row per application
@@ -60,9 +62,10 @@
     authentication (db_datareader, or the ConfigMgr reporting role, which also covers the
     fn_List* functions). The ConfigMgr console is not needed.
 
-    Only direct references are listed. When a task sequence runs a child task sequence, the
-    application appears against the child only. Applications installed from a dynamic variable
-    list (Install Application step using a base variable name) are not references and are not listed.
+    When a task sequence runs a child task sequence, the child's applications are listed against
+    both the child and the parent (one level deep). Applications installed from a dynamic
+    variable list (Install Application step using a base variable name) are not references and
+    are not listed.
 #>
 [CmdletBinding()]
 param(
@@ -118,6 +121,15 @@ function Get-Column {
     return (Get-DbValue $Row[$Name])
 }
 
+function Export-Report {
+    # Export-Csv writes nothing when there are no rows, so an empty file is created instead
+    # to keep every reported path valid
+    param([object[]]$Rows, [string]$Path)
+
+    if ($Rows.Count) { $Rows | Export-Csv -Path $Path -NoTypeInformation }
+    else { New-Item -ItemType File -Force -Path $Path | Out-Null }
+}
+
 function Get-NodeText {
     # PowerShell returns an XML element as a string when it has no attributes, and as an
     # XmlElement when it has, e.g. <Title ResourceId="...">Name</Title>
@@ -132,58 +144,74 @@ function Get-NodeText {
 
 #region Application XML
 
-function Get-DigestInfo {
-    # Reads the application title and its deployment types from SDMPackageDigest. The
-    # Application element lists the deployment types in priority order; each DeploymentType
-    # element holds its installer, content and command lines.
+function Read-Digest {
+    # Parses an SDMPackageDigest and returns its AppMgmtDigest element, or an error message
     param([string]$Digest)
 
-    $result = [pscustomobject]@{ Title = ''; AllowTSInstall = $false; DeploymentTypes = @(); Error = '' }
-    if ([string]::IsNullOrWhiteSpace($Digest)) { return $result }
-
+    if ([string]::IsNullOrWhiteSpace($Digest)) { return [pscustomobject]@{ Root = $null; Error = '' } }
     try {
-        $root = ([xml]$Digest).AppMgmtDigest
+        return [pscustomobject]@{ Root = ([xml]$Digest).AppMgmtDigest; Error = '' }
     }
     catch {
-        $result.Error = "Could not parse SDMPackageDigest: $($_.Exception.Message)"
-        return $result
+        return [pscustomobject]@{ Root = $null; Error = "Could not parse SDMPackageDigest: $($_.Exception.Message)" }
     }
+}
+
+function Get-DigestInfo {
+    # Reads the application title, AllowTSInstall and the ModelNames of its deployment types,
+    # in priority order, from the application's SDMPackageDigest
+    param([string]$Digest)
+
+    $result = [pscustomobject]@{ Title = ''; AllowTSInstall = $false; DeploymentTypeModels = @(); Error = '' }
+    $parsed = Read-Digest $Digest
+    $result.Error = $parsed.Error
+    if (-not $parsed.Root) { return $result }
+    $root = $parsed.Root
 
     $result.Title = Get-NodeText $root.Application.Title
     # "Allow this application to be installed from the Install Application task sequence action
     # without being deployed". The element is absent when the box is not ticked.
     $result.AllowTSInstall = (Get-NodeText $root.Application.AutoInstall) -eq 'true'
 
-    $priority = @{}
-    $index = 1
-    foreach ($reference in @($root.Application.DeploymentTypes.DeploymentType)) {
-        if ($reference -and $reference.LogicalName) { $priority[$reference.LogicalName] = $index++ }
-    }
-
-    $deploymentTypes = foreach ($dt in @($root.DeploymentType)) {
-        if (-not $dt) { continue }
-
-        $technology = if ($dt.Installer.Technology) { $dt.Installer.Technology } else { Get-NodeText $dt.Technology }
-
-        # A deployment type can have several content items, e.g. separate uninstall content
-        $locations = @($dt.Installer.Contents.Content |
-            ForEach-Object { if ($_) { Get-NodeText $_.Location } } |
-            Where-Object { $_ } |
-            Select-Object -Unique)
-
-        [pscustomobject]@{
-            Priority         = if ($priority.ContainsKey($dt.LogicalName)) { $priority[$dt.LogicalName] } else { 999 }
-            Name             = Get-NodeText $dt.Title
-            Technology       = $technology
-            ContentLocation  = $locations -join '; '
-            InstallCommand   = Get-NodeText $dt.Installer.CustomData.InstallCommandLine
-            UninstallCommand = Get-NodeText $dt.Installer.CustomData.UninstallCommandLine
-            LogicalName      = $dt.LogicalName
-        }
-    }
-
-    $result.DeploymentTypes = @($deploymentTypes | Sort-Object -Property Priority, Name)
+    $result.DeploymentTypeModels = @(foreach ($reference in @($root.Application.DeploymentTypes.DeploymentType)) {
+        if ($reference -and $reference.LogicalName) { "$($reference.AuthoringScopeId)/$($reference.LogicalName)" }
+    })
     return $result
+}
+
+function Get-CommandLine {
+    # Some technologies keep the command line in CustomData, others only in the action's Args.
+    # The uninstall action names its argument InstallCommandLine too.
+    param($Dt, [string]$Action)
+
+    $text = Get-NodeText $Dt.Installer.CustomData."${Action}CommandLine"
+    if ($text) { return $text }
+
+    $arg = @($Dt.Installer."${Action}Action".Args.Arg) |
+        Where-Object { $_ -is [System.Xml.XmlElement] -and $_.GetAttribute('Name') -eq 'InstallCommandLine' } |
+        Select-Object -First 1
+    return (Get-NodeText $arg)
+}
+
+function Get-DeploymentTypeInfo {
+    # Reads the installer, content and command lines from a DeploymentType element
+    param($Dt)
+
+    $technology = if ($Dt.Installer.Technology) { $Dt.Installer.Technology } else { Get-NodeText $Dt.Technology }
+
+    # A deployment type can have several content items, e.g. separate uninstall content
+    $locations = @($Dt.Installer.Contents.Content |
+        ForEach-Object { if ($_) { Get-NodeText $_.Location } } |
+        Where-Object { $_ } |
+        Select-Object -Unique)
+
+    [pscustomobject]@{
+        Name             = Get-NodeText $Dt.Title
+        Technology       = $technology
+        ContentLocation  = $locations -join '; '
+        InstallCommand   = Get-CommandLine $Dt 'Install'
+        UninstallCommand = Get-CommandLine $Dt 'Uninstall'
+    }
 }
 
 #endregion
@@ -232,37 +260,54 @@ function Get-ApplicationFolders {
     return $paths
 }
 
+function Get-DeploymentTypes {
+    # Returns a table of deployment type ModelName to its details. Deployment types are CIs of
+    # their own; the application's digest only lists their ModelNames.
+    $query = @"
+SELECT dt.ModelName, dt.DisplayName, CAST(ci.SDMPackageDigest AS nvarchar(max)) AS DtDigest
+FROM fn_ListDeploymentTypeCIs($LocaleId) dt
+JOIN v_ConfigurationItems ci ON ci.CI_ID = dt.CI_ID
+WHERE dt.IsLatest = 1
+"@
+    $deploymentTypes = @{}
+    foreach ($row in (Invoke-SqlQuery -Query $query).Rows) {
+        $parsed = Read-Digest (Get-DbValue $row.DtDigest)
+        if ($parsed.Error) { Write-Log "$($row.DisplayName): $($parsed.Error)" 'WARN' }
+        if (-not $parsed.Root -or -not $parsed.Root.DeploymentType) { continue }
+
+        $info = Get-DeploymentTypeInfo $parsed.Root.DeploymentType
+        if (-not $info.Name) { $info.Name = Get-DbValue $row.DisplayName }
+        $deploymentTypes[$row.ModelName] = $info
+    }
+    return $deploymentTypes
+}
+
 function Get-TaskSequenceAppReferences {
     # Returns TaskSequenceID, TaskSequenceName and the referenced application's ModelName.
-    # The reference table holds RefAppModelName on current versions; when it only has
-    # RefAppCI_ID, the CI is mapped to its ModelName across all application revisions.
-    $references = Invoke-SqlQuery -Query 'SELECT * FROM v_TaskSequenceAppReferencesInfo'
-    $columns = @($references.Columns | ForEach-Object { $_.ColumnName })
-
-    $ciToModel = @{}
-    if ('RefAppModelName' -notin $columns) {
-        if ('RefAppCI_ID' -notin $columns) {
-            throw "v_TaskSequenceAppReferencesInfo has neither RefAppModelName nor RefAppCI_ID. Columns: $($columns -join ', ')"
-        }
-        Write-Log 'RefAppModelName not available, mapping RefAppCI_ID to applications'
-        foreach ($row in (Invoke-SqlQuery -Query "SELECT CI_ID, ModelName FROM fn_ListApplicationCIs($LocaleId)").Rows) {
-            $ciToModel[[int]$row.CI_ID] = $row.ModelName
-        }
+    # v_TS_AppReferences_Flat includes retired applications, which v_TaskSequenceAppReferencesInfo
+    # leaves out, and also lists applications of child task sequences against the parent.
+    $query = @'
+SELECT ts.PackageID, ts.Name, r.AppModelName
+FROM v_TS_AppReferences_Flat r
+JOIN v_TaskSequencePackage ts ON ts.TS_ID = r.TS_ID
+'@
+    try {
+        $references = Invoke-SqlQuery -Query $query
     }
-
-    $names = @{}
-    foreach ($row in (Invoke-SqlQuery -Query 'SELECT PackageID, Name FROM v_TaskSequencePackage').Rows) {
-        $names[$row.PackageID] = $row.Name
+    catch {
+        Write-Log "v_TS_AppReferences_Flat not available, retired applications will be missing from task sequence references: $($_.Exception.Message)" 'WARN'
+        $references = Invoke-SqlQuery -Query @'
+SELECT r.PackageID, ts.Name, r.RefAppModelName AS AppModelName
+FROM v_TaskSequenceAppReferencesInfo r
+JOIN v_TaskSequencePackage ts ON ts.PackageID = r.PackageID
+'@
     }
 
     foreach ($row in $references.Rows) {
-        $modelName = if ('RefAppModelName' -in $columns) { Get-DbValue $row.RefAppModelName }
-                     else { $ciToModel[[int](Get-DbValue $row.RefAppCI_ID)] }
-
         [pscustomobject]@{
             TaskSequenceID   = $row.PackageID
-            TaskSequenceName = $names[$row.PackageID]
-            ModelName        = $modelName
+            TaskSequenceName = $row.Name
+            ModelName        = Get-DbValue $row.AppModelName
         }
     }
 }
@@ -275,7 +320,13 @@ if (-not $Database) {
     if (-not $SiteCode) { throw 'Specify -SiteCode (database CM_<SiteCode>) or -Database.' }
     $Database = "CM_$SiteCode"
 }
-$script:ConnectionString = "Server=$SqlServer;Database=$Database;Integrated Security=True;Application Name=Get-CMApplicationInventory"
+# The builder quotes values, so server or database names containing ; or = cannot break the string
+$builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+$builder['Data Source'] = $SqlServer
+$builder['Initial Catalog'] = $Database
+$builder['Integrated Security'] = $true
+$builder['Application Name'] = 'Get-CMApplicationInventory'
+$script:ConnectionString = $builder.ConnectionString
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd_HHmm'
@@ -294,6 +345,10 @@ foreach ($reference in $references) {
     if (-not $referencesByModel.ContainsKey($reference.ModelName)) { $referencesByModel[$reference.ModelName] = @() }
     $referencesByModel[$reference.ModelName] += $reference
 }
+
+Write-Log 'Reading deployment types'
+$deploymentTypesByModel = Get-DeploymentTypes
+Write-Log "Found $($deploymentTypesByModel.Count) deployment type(s)"
 
 Write-Log 'Reading console folders'
 $folderPaths = Get-ApplicationFolders
@@ -315,11 +370,18 @@ $applications = foreach ($row in $appRows) {
     }
     if ($digest.Error) { Write-Log "${name}: $($digest.Error)" 'WARN' }
 
-    foreach ($dt in $digest.DeploymentTypes) {
+    # The digest lists the deployment types in priority order
+    $appDts = @(foreach ($dtModel in $digest.DeploymentTypeModels) {
+        if ($deploymentTypesByModel.ContainsKey($dtModel)) { $deploymentTypesByModel[$dtModel] }
+        else { Write-Log "${name}: deployment type $dtModel not found" 'WARN' }
+    })
+
+    $priority = 0
+    foreach ($dt in $appDts) {
         $deploymentTypeRows.Add([pscustomobject]@{
             Application      = $name
             Status           = $status
-            Priority         = if ($dt.Priority -eq 999) { $null } else { $dt.Priority }
+            Priority         = ++$priority
             DeploymentType   = $dt.Name
             Technology       = $dt.Technology
             ContentLocation  = $dt.ContentLocation
@@ -339,14 +401,17 @@ $applications = foreach ($row in $appRows) {
         Status              = $status
         IsSuperseded        = (Get-Column $row 'IsSuperseded') -eq $true
         Deployments         = [int](Get-Column $row 'NumberOfDeployments')
-        DeploymentTypeCount = $digest.DeploymentTypes.Count
-        DeploymentTypes     = ($digest.DeploymentTypes | ForEach-Object { "$($_.Name) ($($_.Technology))" }) -join '; '
-        ContentLocations    = (@($digest.DeploymentTypes | ForEach-Object { $_.ContentLocation -split '; ' }) |
+        DeploymentTypeCount = $appDts.Count
+        DeploymentTypes     = ($appDts | ForEach-Object { "$($_.Name) ($($_.Technology))" }) -join '; '
+        ContentLocations    = (@($appDts | ForEach-Object { $_.ContentLocation -split '; ' }) |
                                 Where-Object { $_ } | Select-Object -Unique) -join '; '
         TaskSequenceCount   = $tsRefs.Count
         TaskSequences       = ($tsRefs | ForEach-Object { "$($_.TaskSequenceName) ($($_.TaskSequenceID))" }) -join '; '
         AllowTSInstall      = $digest.AllowTSInstall
-        DependentDTs        = [int](Get-Column $row 'NumberOfDependentDTs')
+        # NumberOfDependedDTs counts deployment types that depend on this application; older
+        # sites may only have NumberOfDependentDTs
+        DependentDTs        = [int]$(if ($row.Table.Columns.Contains('NumberOfDependedDTs')) { Get-Column $row 'NumberOfDependedDTs' }
+                                     else { Get-Column $row 'NumberOfDependentDTs' })
         CreatedBy           = Get-Column $row 'CreatedBy'
         DateCreated         = Get-Column $row 'DateCreated'
         LastModifiedBy      = Get-Column $row 'LastModifiedBy'
@@ -378,9 +443,9 @@ $appCsv = Join-Path $OutputDirectory "Applications_$stamp.csv"
 $dtCsv  = Join-Path $OutputDirectory "DeploymentTypes_$stamp.csv"
 $tsCsv  = Join-Path $OutputDirectory "TaskSequenceReferences_$stamp.csv"
 
-$applications | Export-Csv -Path $appCsv -NoTypeInformation
-$deploymentTypeRows | Sort-Object -Property Application, Priority | Export-Csv -Path $dtCsv -NoTypeInformation
-@($referenceRows) | Export-Csv -Path $tsCsv -NoTypeInformation
+Export-Report -Rows $applications -Path $appCsv
+Export-Report -Rows @($deploymentTypeRows | Sort-Object -Property Application, Priority) -Path $dtCsv
+Export-Report -Rows @($referenceRows) -Path $tsCsv
 
 $retired = @($applications | Where-Object { $_.Status -eq 'Retired' })
 $retiredInTs = @($retired | Where-Object { $_.TaskSequenceCount -gt 0 })
