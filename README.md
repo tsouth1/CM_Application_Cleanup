@@ -12,13 +12,13 @@ For each application (latest revision) it reports:
 | --- | --- |
 | Status | `Active`, or `Retired` when the application is retired |
 | IsSuperseded | Whether a newer application supersedes it |
-| Deployments | Number of deployments |
+| Deployments | Number of deployments of the application (task sequence deployments are not counted) |
 | DeploymentTypes | Deployment type names and technology, in priority order |
 | ContentLocations | Content source paths of the deployment types |
-| TaskSequences | Task sequences with an Install Application step that references it |
+| TaskSequences | Task sequences with an Install Application step that references it, including retired applications and applications installed by a child task sequence |
 | AllowTSInstall | Whether it can be installed by a task sequence without being deployed |
-| DependentDTs | Number of deployment types in other applications that depend on it |
-| ObjectPath | Console folder, e.g. `/Software/Adobe` |
+| DependentDTs | Number of deployment types in other applications that depend on it (an application with dependents is not flagged as unused) |
+| ObjectPath | Console folder, e.g. `/Software/Adobe` (`/` is the root folder) |
 
 It also logs a summary that highlights cleanup candidates and problems:
 
@@ -31,15 +31,18 @@ It also logs a summary that highlights cleanup candidates and problems:
 Written to `-OutputDirectory` (default `.\AppInventory`):
 
 - `Applications_<timestamp>.csv` - one row per application
-- `DeploymentTypes_<timestamp>.csv` - one row per deployment type, including install and uninstall commands
+- `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location and install and uninstall commands
 - `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair
+
+A report with no rows is still written as an empty file, so every path in the log exists.
 
 The application rows are also returned on the pipeline.
 
 ### Requirements
 
 - PowerShell 5.1 or later
-- Read access to the site database with Windows authentication (`db_datareader`, or the ConfigMgr reporting role)
+- Read access to the site database with Windows authentication (`db_datareader`, or the ConfigMgr reporting role `smsschm_users`)
+- Tested against ConfigMgr 2603. Columns that differ between versions are read when present; when missing, text columns are left blank and counts are 0.
 
 ### Usage
 
@@ -64,5 +67,6 @@ $apps | Where-Object { $_.Status -eq 'Retired' -and $_.TaskSequenceCount } |
 ### Limitations
 
 - An application installed by a child task sequence is listed against both the child and the parent, one level deep. Deeper nesting is not followed.
+- Task sequence references come from `v_TS_AppReferences_Flat`. On sites without that view the script falls back to `v_TaskSequenceAppReferencesInfo` and logs a warning; that view omits retired applications, so the retired-in-task-sequence check will miss them.
 - Applications installed from a dynamic variable list (Install Application step using a base variable name) are not detected as references.
 - The script is read-only; it does not change or delete anything in ConfigMgr.
