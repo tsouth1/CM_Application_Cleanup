@@ -285,7 +285,7 @@ $appRows = (Get-Applications).Rows
 Write-Log "Found $($appRows.Count) application(s)"
 
 Write-Log 'Reading task sequence application references'
-$references = @(Get-TaskSequenceAppReferences | Sort-Object -Property TaskSequenceName, ModelName -Unique)
+$references = @(Get-TaskSequenceAppReferences | Sort-Object -Property TaskSequenceName, TaskSequenceID, ModelName -Unique)
 Write-Log "Found $($references.Count) reference(s) in $(@($references | Select-Object -ExpandProperty TaskSequenceID -Unique).Count) task sequence(s)"
 
 $referencesByModel = @{}
