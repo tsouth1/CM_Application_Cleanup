@@ -12,6 +12,8 @@
       Deployments          Number of deployments of the application
       DeploymentTypes      Deployment type names and technology, in priority order
       ContentLocations     Content source paths of the deployment types
+      SizeKB               Total size of the deployment types' content in KB; content shared
+                           between deployment types is counted once
       TaskSequences        Task sequences with a step that installs the application
       AllowTSInstall       Whether a task sequence may install it without a deployment
       DependentDTs         Deployment types of other applications that depend on it
@@ -142,6 +144,12 @@ function Get-NodeText {
     return ([string]$Node.InnerText).Trim()
 }
 
+function ConvertTo-KB {
+    # Bytes to whole KB, rounded up so content smaller than 1 KB does not show as 0
+    param($Bytes)
+    return [long][math]::Ceiling([double]$Bytes / 1KB)
+}
+
 #endregion
 
 #region Application XML
@@ -207,10 +215,24 @@ function Get-DeploymentTypeInfo {
         Where-Object { $_ } |
         Select-Object -Unique)
 
+    # Size in bytes of each content item, keyed by ContentId so content shared between the
+    # install and uninstall actions, or between deployment types, is counted once
+    $contentSizes = @{}
+    foreach ($content in @($Dt.Installer.Contents.Content)) {
+        if (-not $content) { continue }
+        $bytes = 0
+        foreach ($file in @($content.File)) {
+            if ($file -is [System.Xml.XmlElement]) { $bytes += [long]$file.GetAttribute('Size') }
+        }
+        $contentSizes[[string]$content.ContentId] = $bytes
+    }
+
     [pscustomobject]@{
         Name             = Get-NodeText $Dt.Title
         Technology       = $technology
         ContentLocation  = $locations -join '; '
+        ContentSizes     = $contentSizes
+        SizeKB           = ConvertTo-KB ($contentSizes.Values | Measure-Object -Sum).Sum
         InstallCommand   = Get-CommandLine $Dt 'Install'
         UninstallCommand = Get-CommandLine $Dt 'Uninstall'
     }
@@ -413,6 +435,7 @@ $applications = foreach ($row in $appRows) {
             DeploymentType   = $dt.Name
             Technology       = $dt.Technology
             ContentLocation  = $dt.ContentLocation
+            SizeKB           = $dt.SizeKB
             InstallCommand   = $dt.InstallCommand
             UninstallCommand = $dt.UninstallCommand
             ModelName        = $row.ModelName
@@ -420,6 +443,13 @@ $applications = foreach ($row in $appRows) {
     }
 
     $tsRefs = @($referencesByModel[$row.ModelName] | Where-Object { $_ })
+
+    $appContentSizes = @{}
+    foreach ($dt in $appDts) {
+        foreach ($id in $dt.ContentSizes.Keys) {
+            if ($dt.ContentSizes[$id] -gt $appContentSizes[$id]) { $appContentSizes[$id] = $dt.ContentSizes[$id] }
+        }
+    }
 
     [pscustomobject]@{
         Application         = $name
@@ -433,6 +463,7 @@ $applications = foreach ($row in $appRows) {
         DeploymentTypes     = ($appDts | ForEach-Object { "$($_.Name) ($($_.Technology))" }) -join '; '
         ContentLocations    = (@($appDts | ForEach-Object { $_.ContentLocation -split '; ' }) |
                                 Where-Object { $_ } | Select-Object -Unique) -join '; '
+        SizeKB              = ConvertTo-KB ($appContentSizes.Values | Measure-Object -Sum).Sum
         TaskSequenceCount   = $tsRefs.Count
         TaskSequences       = ($tsRefs | ForEach-Object { "$($_.TaskSequenceName) ($($_.TaskSequenceID))" }) -join '; '
         AllowTSInstall      = $digest.AllowTSInstall

@@ -15,6 +15,7 @@ For each application (latest revision) it reports:
 | Deployments | Number of deployments of the application (task sequence deployments are not counted) |
 | DeploymentTypes | Deployment type names and technology, in priority order |
 | ContentLocations | Content source paths of the deployment types |
+| SizeKB | Total size of the deployment types' content in KB, from the file sizes recorded in ConfigMgr when the content was last updated. Content shared between deployment types is counted once |
 | TaskSequences | Task sequences with an Install Application step that references it, including retired applications and applications installed by a child task sequence |
 | AllowTSInstall | Whether it can be installed by a task sequence without being deployed |
 | DependentDTs | Number of deployment types in other applications that depend on it (an application with dependents is not flagged as unused) |
@@ -31,7 +32,7 @@ It also logs a summary that highlights cleanup candidates and problems:
 Written to `-OutputDirectory` (default `.\AppInventory`):
 
 - `Applications_<timestamp>.csv` - one row per application
-- `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location and install and uninstall commands
+- `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location, content size in KB and install and uninstall commands
 - `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair. `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the application, the same value as in the applications report
 
 A report with no rows is still written as an empty file, so every path in the log exists.
