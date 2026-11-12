@@ -1,6 +1,57 @@
 # CM_Application_Cleanup
 
-Tools for finding Configuration Manager (ConfigMgr / MECM) applications and packages that can be retired or removed.
+Tools for finding Configuration Manager (ConfigMgr / MECM) applications, packages, collections and task sequences that can be retired or removed, and a Windows app that runs them.
+
+| Script | What it does | Reads |
+| --- | --- | --- |
+| `SCCM-MaintenanceApp.ps1` | Windows app that runs the scripts below and shows their reports | |
+| `Get-CMApplicationInventory.ps1` | Application inventory | Site database (SQL) |
+| `Get-CMPackageInventory.ps1` | Package inventory: standard, driver, OS image, OS upgrade and boot image packages | Site database (SQL) |
+| `Get-CMTaskSequenceInventory.ps1` | Task sequence inventory | Site database (SQL) |
+| `Collection-Inventory.v4.ps1` | Collection inventory with collection-to-collection references | SMS Provider (WMI) |
+| `Delete-MarkedCollections.ps1` | Deletes collections marked `Y` in a collection inventory, after checking and backing up each one | SMS Provider and ConfigMgr console module |
+
+All scripts except `Delete-MarkedCollections.ps1` are read-only.
+
+## Standard parameters
+
+Every script uses the same parameter names for the same settings and takes the ones it needs:
+
+| Parameter | Meaning | Applications | Packages | Task sequences | Collections | Delete |
+| --- | --- | :-: | :-: | :-: | :-: | :-: |
+| `-SqlServer` | SQL Server hosting the site database, e.g. `cmsql01` or `cmsql01\INSTANCE` | ✓ | ✓ | ✓ | | |
+| `-Database` | Site database name; defaults to `CM_<SiteCode>` | ✓ | ✓ | ✓ | | |
+| `-SiteServer` | Server hosting the SMS Provider | | | | ✓ | ✓ |
+| `-SiteCode` | Site code | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `-OutputDirectory` | Folder for the reports (and, for Delete, the deletion log and backups) | ✓ | ✓ | ✓ | ✓ | ✓ |
+| `-QueryTimeout` | SQL command timeout in seconds (default `300`) | ✓ | ✓ | ✓ | | |
+| `-LocaleId` | Locale for application names (default `1033`) | ✓ | | ✓ | | |
+
+Reports are named `<Report>_<yyyyMMdd_HHmm>.csv`. Every script logs lines in the form `[HH:mm:ss] [LEVEL] message`, returns its main report rows on the pipeline, and writes an empty file for a report with no rows so every path in the log exists. The SQL scripts stop with an error if they cannot connect to the site database.
+
+## SCCM-MaintenanceApp.ps1
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\SCCM-MaintenanceApp.ps1
+```
+
+**SCCM Maintenance App** has a tab for each inventory (Applications, Packages, Collections, Task Sequences) and a Log tab.
+
+- **Settings** at the top are shared by every tab: site server, SQL server, site code, site database, query timeout, locale ID and output folder. The Collections tab adds the collection exclusions. **Save Settings** writes them all to `SCCM-MaintenanceApp.settings.json` next to the script, and they are loaded at the next start.
+- **Run Inventory** runs the tab's script in the background. The window stays responsive, the script's log is shown live in the Log tab, the status bar shows its latest line and progress, and **Cancel** stops it. When it finishes, its main report is shown.
+- **Open Output Folder** opens the tab's report folder. Reports go to a subfolder per tab under the output folder: `Applications`, `Packages`, `Collections`, `TaskSequences`.
+- **Report** picks which of the tab's reports to show; the latest file of that kind in the folder is loaded. **Open CSV...** shows any other report file.
+- The grid sorts when you click a column header. Right-click a header for an Excel-style filter: sort buttons, a checklist of the values (with its own search box and Select All) and Clear Filter. Filtered columns are highlighted and marked ▼. **Search** filters rows containing the text in any column. Numbers and dates sort and filter as numbers and dates.
+- **Export Filtered Report** saves the rows and columns shown, in the order shown, to a new CSV. **Clear Filters** removes all filters and the search text.
+- The **Log** tab shows every script's output, with warnings in orange and errors in red. It is also appended to `SCCM-MaintenanceApp_<yyyyMMdd>.log` in the output folder.
+
+To delete collections from the Collections tab:
+
+1. Show the Collections report and enter `Y` in the green `to be deleted` column of each collection to delete.
+2. **Preview Deletion** saves the marks to the report CSV and runs `Delete-MarkedCollections.ps1` without deleting anything. The Log tab shows which collections would be deleted and which are skipped, and why.
+3. **Delete Marked Collections** saves the marks, asks you to type `DELETE`, then runs the script with `-Execute`. Each collection is checked against the live site and backed up before it is deleted.
+
+Requirements: Windows PowerShell 5.1, and the access each script needs (below). The scripts must be in the same folder as the app.
 
 ## Get-CMApplicationInventory.ps1
 
@@ -35,10 +86,6 @@ Written to `-OutputDirectory` (default `.\AppInventory`):
 - `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location, content size in KB and install and uninstall commands
 - `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair. `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the application, the same value as in the applications report
 
-A report with no rows is still written as an empty file, so every path in the log exists.
-
-The application rows are also returned on the pipeline.
-
 ### Requirements
 
 - PowerShell 5.1 or later
@@ -56,14 +103,7 @@ $apps | Where-Object { $_.Status -eq 'Retired' -and $_.TaskSequenceCount } |
     Format-Table Application, TaskSequences
 ```
 
-| Parameter | Description |
-| --- | --- |
-| `-SqlServer` | SQL Server hosting the site database (required) |
-| `-SiteCode` | Site code; the database name `CM_<SiteCode>` is built from it |
-| `-Database` | Site database name; overrides `-SiteCode` |
-| `-LocaleId` | Locale for application names (default `1033`) |
-| `-OutputDirectory` | Folder for the CSV reports (default `.\AppInventory`) |
-| `-QueryTimeout` | SQL command timeout in seconds (default `300`) |
+Parameters: `-SqlServer` (required), `-SiteCode` or `-Database`, `-LocaleId`, `-OutputDirectory` (default `.\AppInventory`) and `-QueryTimeout`; see [Standard parameters](#standard-parameters).
 
 ### Limitations
 
@@ -107,8 +147,6 @@ Written to `-OutputDirectory` (default `.\PackageInventory`):
 - `Programs_<timestamp>.csv` - one row per program, with command line, disabled state, deployments, the program it runs first and the programs that run it first
 - `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and package pair. `Via` names the child task sequences, run by a Run Task Sequence step, that also reference the package; the package may also be used by the parent's own steps. Program is blank when the step uses the package content without running a program (driver packages, OS images, Run Command Line). `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the package
 
-The package rows are also returned on the pipeline. The script stops with an error if it cannot connect to the site database.
-
 ### Usage
 
 ```powershell
@@ -120,7 +158,7 @@ $packages | Where-Object { $_.PackageType -eq 'Driver package' -and -not $_.Task
     Sort-Object SizeKB -Descending | Format-Table Package, PackageID, SizeKB
 ```
 
-Parameters are the same as the application script, without `-LocaleId`.
+Parameters are the same as the application script, without `-LocaleId`; the default output folder is `.\PackageInventory`.
 
 ### Limitations
 
@@ -131,3 +169,84 @@ Parameters are the same as the application script, without `-LocaleId`.
 - Packages installed from a dynamic variable list (Install Package step using a base variable name) are not detected as references.
 - Boot images used only for PXE or boot media show no task sequence references.
 - The script is read-only; it does not change or delete anything in ConfigMgr.
+
+## Get-CMTaskSequenceInventory.ps1
+
+Inventories every task sequence from the site database over SQL, like the application and package scripts.
+
+For each task sequence it reports:
+
+| Column | Meaning |
+| --- | --- |
+| Type | `Generic`, or `OS deployment` when it has operating system steps |
+| Disabled | "Disable this task sequence on computers where it is deployed" is set |
+| Deployments | Number of deployments; `DeployedTo` lists the target collections |
+| BootImage | Boot image set on the task sequence |
+| ParentTaskSequences | Task sequences that run it with a Run Task Sequence step |
+| ChildTaskSequences | Task sequences it runs with a Run Task Sequence step |
+| Packages | Packages it uses, including the boot image and the packages of its child task sequences |
+| Applications | Applications it installs, including retired ones; `RetiredApplications` lists the retired ones |
+| ContentSizeKB | Total source size of the referenced packages in KB (applications not included) |
+| ObjectPath | Console folder (`/` is the root folder) |
+
+The log summary lists task sequences with no deployments that no other task sequence runs (likely unused), disabled task sequences that are still deployed or run by another task sequence, and task sequences that install retired applications.
+
+### Output
+
+Written to `-OutputDirectory` (default `.\TaskSequenceInventory`):
+
+- `TaskSequences_<timestamp>.csv` - one row per task sequence
+- `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and referenced package, child task sequence or application, with its type, program, application status and size
+
+### Usage
+
+```powershell
+.\Get-CMTaskSequenceInventory.ps1 -SqlServer cmsql01.contoso.local -SiteCode PS1
+
+# Task sequences nothing deploys or runs
+$ts = .\Get-CMTaskSequenceInventory.ps1 -SqlServer cmsql01\CONFIGMGR -Database CM_PS1
+$ts | Where-Object { -not $_.Deployments -and -not $_.ParentTaskSequences } | Format-Table TaskSequence, PackageID, SourceDate
+```
+
+### Limitations
+
+- The package references view includes the content of child task sequences, so a parent lists its children's packages as well as its own.
+- Steps that point at deleted packages are not reported; see the package script's limitations.
+
+## Collection-Inventory.v4.ps1
+
+Inventories every collection through the SMS Provider, with the collections that reference each one (limiting, include, exclude and query rules), deployments by type, membership rules and evaluation settings. Built-in collections and collections matching `-ExcludeFolder`, `-ExcludeNameSuffix` or `-ExcludeLimitedTo` are left out of the report, but their references to other collections still count.
+
+Written to `-OutputDirectory` (default `.\CollectionInventory`):
+
+- `Collections_<timestamp>.csv` - one row per collection, starting with an empty `to be deleted` column for marking collections for `Delete-MarkedCollections.ps1`
+- `CollectionReferences_<timestamp>.csv` - one row per reference between two collections
+
+```powershell
+.\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -OutputDirectory C:\Reports\Collections
+.\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeNameSuffix '-sec', '-test' -ExcludeLimitedTo @()
+```
+
+| Parameter | Description |
+| --- | --- |
+| `-SiteServer` | SMS Provider server (default: this computer) |
+| `-SiteCode` | Site code (default `LEA`); pass `''` to detect it |
+| `-OutputDirectory` | Folder for the reports (default `.\CollectionInventory`) |
+| `-ExcludeFolder` | Console folder patterns to leave out, `*` as wildcard (default: the Office 365 and Security Patches deployment folders); `@()` turns it off |
+| `-ExcludeNameSuffix` | Name endings to leave out (default `-sec`); `@()` turns it off |
+| `-ExcludeLimitedTo` | Limiting collection IDs to leave out (default `LEA013D0`); `@()` turns it off |
+
+Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses.
+
+## Delete-MarkedCollections.ps1
+
+Deletes the collections marked `Y` in the `to be deleted` column of a `Collections_<timestamp>.csv`. Each marked collection is checked against the live site first and skipped, with the reason logged, when it is built in, no longer exists, has been renamed, has deployments (including client settings and antimalware policies), is referenced by another collection, or is listed twice. Each collection that passes is backed up to JSON before it is deleted; if the backup fails it is not deleted.
+
+Without `-Execute` it only shows what it would do. With `-Execute` it asks you to type `DELETE`, unless `-Force` is passed (the Maintenance App asks first and passes `-Force`). Every action is appended to `DeletionLog.csv` and backups go to `DeletionBackups` in `-OutputDirectory`, which defaults to the folder of the input CSV.
+
+```powershell
+.\Delete-MarkedCollections.ps1 -InputPath .\CollectionInventory\Collections_20261025_1200.csv -SiteServer CM01 -SiteCode PS1
+.\Delete-MarkedCollections.ps1 -InputPath .\CollectionInventory\Collections_20261025_1200.csv -SiteServer CM01 -SiteCode PS1 -Execute
+```
+
+Requires the ConfigMgr console on the machine running it, for the delete cmdlets.

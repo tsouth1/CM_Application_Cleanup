@@ -375,6 +375,10 @@ $builder['Integrated Security'] = $true
 $builder['Application Name'] = 'Get-CMApplicationInventory'
 $script:ConnectionString = $builder.ConnectionString
 
+# Stop here rather than log every later query failing and write empty reports
+try { [void](Invoke-SqlQuery -Query 'SELECT 1') }
+catch { throw "Could not connect to $Database on ${SqlServer}: $($_.Exception.GetBaseException().Message)" }
+
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $stamp = Get-Date -Format 'yyyyMMdd_HHmm'
 
