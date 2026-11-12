@@ -33,8 +33,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$SettingsPath = (Join-Path $PSScriptRoot 'SCCM-MaintenanceApp.settings.json')
+    [string]$SettingsPath
 )
+
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty in parameter defaults when the script is
+# started with powershell.exe -File (e.g. from a batch file), so the default is set here instead
+if (-not $SettingsPath) { $SettingsPath = Join-Path $PSScriptRoot 'SCCM-MaintenanceApp.settings.json' }
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
 
