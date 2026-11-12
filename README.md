@@ -43,6 +43,7 @@ powershell.exe -ExecutionPolicy Bypass -File .\SCCM-MaintenanceApp.ps1
 - **Open Output Folder** opens the tab's report folder. Reports go to a subfolder per tab under the output folder: `Applications`, `Packages`, `Collections`, `TaskSequences`.
 - **Report** picks which of the tab's reports to show; the latest file of that kind in the folder is loaded. **Open CSV...** shows any other report file.
 - The grid sorts when you click a column header. Right-click a header for an Excel-style filter: sort buttons, a checklist of the values (with its own search box and Select All) and Clear Filter. Filtered columns are highlighted and marked ▼. **Search** filters rows containing the text in any column. Numbers and dates sort and filter as numbers and dates.
+- Drag a column header to move the column. The order is kept for each kind of report (e.g. the Applications report) and is saved by **Save Settings**, so it is used the next time the app opens. **Reset Columns** puts the report's columns back in the script's order. Shift + mouse wheel scrolls the grid sideways.
 - **Export Filtered Report** saves the rows and columns shown, in the order shown, to a new CSV. **Clear Filters** removes all filters and the search text.
 - The **Log** tab shows every script's output, with warnings in orange and errors in red. It is also appended to `SCCM-MaintenanceApp_<yyyyMMdd>.log` in the output folder.
 
@@ -64,6 +65,7 @@ For each application (latest revision) it reports:
 
 | Column | Meaning |
 | --- | --- |
+| TSandDeploymentCount | `Deployments` plus `TaskSequenceCount`; 0 means nothing deploys or installs the application |
 | Status | `Active`, or `Retired` when the application is retired |
 | IsSuperseded | Whether a newer application supersedes it |
 | Deployments | Number of deployments of the application (task sequence deployments are not counted) |
@@ -85,7 +87,7 @@ It also logs a summary that highlights cleanup candidates and problems:
 
 Written to `-OutputDirectory` (default `.\AppInventory`):
 
-- `Applications_<timestamp>.csv` - one row per application
+- `Applications_<timestamp>.csv` - one row per application, starting with `Application`, `TSandDeploymentCount`, `SizeKB`, `DateCreated`, `DateLastModified` and `CreatedBy`
 - `DeploymentTypes_<timestamp>.csv` - one row per deployment type in priority order, with technology, content location, content size in KB and install and uninstall commands
 - `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and application pair. `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the application, the same value as in the applications report
 

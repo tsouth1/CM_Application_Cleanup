@@ -77,6 +77,7 @@ $script:RestoreScript = 'Restore-DeletedCollections.ps1'
 $script:MarkColumn = 'to be deleted'
 
 $script:SettingBoxes = @{}     # setting name -> TextBox
+$script:ColumnOrders = @{}     # "<tab>|<report prefix>" -> column names in the order shown
 $script:TabStates = @{}        # tab name -> state of its grid and buttons
 $script:Job = $null            # the script running in the background, if any
 $script:PendingSearch = $null  # tab whose search box changed, applied on the next timer tick
@@ -102,6 +103,9 @@ function Import-Settings {
         foreach ($property in $saved.PSObject.Properties) {
             if ($script:SettingBoxes.ContainsKey($property.Name)) { $script:SettingBoxes[$property.Name].Text = [string]$property.Value }
         }
+        if ($saved.ColumnOrders) {
+            foreach ($property in $saved.ColumnOrders.PSObject.Properties) { $script:ColumnOrders[$property.Name] = [string[]]@($property.Value) }
+        }
         # Settings saved before name suffixes became name patterns: -sec becomes *-sec. The old
         # entry is dropped from the file at the next Save Settings.
         $oldSuffixes = $saved.PSObject.Properties['ExcludeNameSuffix']
@@ -119,7 +123,10 @@ function Import-Settings {
 }
 
 function Save-Settings {
-    Get-Settings | ConvertTo-Json | Set-Content -Path $SettingsPath -Encoding UTF8
+    # The text boxes plus the column order of each report that has been rearranged
+    $settings = Get-Settings
+    $settings.ColumnOrders = $script:ColumnOrders
+    $settings | ConvertTo-Json -Depth 4 | Set-Content -Path $SettingsPath -Encoding UTF8
     Write-AppLog "Settings saved to $SettingsPath"
     Set-Status "Settings saved to $SettingsPath"
 }
@@ -495,8 +502,58 @@ function Set-GridColumns($State) {
         $markColumn.DefaultCellStyle.BackColor = [System.Drawing.Color]::Honeydew
     }
 
+    Set-ColumnOrder $State
     $State.NeedsWidths = $true
     Set-ColumnWidths $State
+}
+
+function Get-ReportKey($State) {
+    # Column orders are kept per tab and kind of report, e.g. "Applications|Applications" for any
+    # Applications_<timestamp>.csv shown on the Applications tab
+    if (-not $State.SourceFile) { return $null }
+    $name = [IO.Path]::GetFileNameWithoutExtension($State.SourceFile)
+    if ($name -match '^(.+?)_\d{8}_\d{4}') { $name = $Matches[1] }
+    return "$($State.Definition.Name)|$name"
+}
+
+function Set-ColumnOrder($State) {
+    # Applies the saved column order of the report. Columns not in the saved order, such as ones
+    # added to a script since, keep their place after the saved ones.
+    $key = Get-ReportKey $State
+    if (-not $key -or -not $script:ColumnOrders.ContainsKey($key)) { return }
+    $columns = @{}
+    foreach ($column in $State.Grid.Columns) { $columns[$column.DataPropertyName] = $column }
+    $order = @($script:ColumnOrders[$key] | Where-Object { $columns.ContainsKey($_) }) +
+             @($State.Grid.Columns | Sort-Object DisplayIndex | ForEach-Object DataPropertyName | Where-Object { $script:ColumnOrders[$key] -notcontains $_ })
+    $State.ApplyingOrder = $true
+    try { for ($i = 0; $i -lt $order.Count; $i++) { $columns[$order[$i]].DisplayIndex = $i } }
+    finally { $State.ApplyingOrder = $false }
+}
+
+function Save-ColumnOrder($State) {
+    # Remembers the order after a column is dragged; Save Settings writes it to the settings file
+    $key = Get-ReportKey $State
+    if (-not $key -or -not $State.ColumnsReady -or $State.ApplyingOrder) { return }
+    $order = [string[]]@($State.Grid.Columns | Sort-Object DisplayIndex | ForEach-Object DataPropertyName)
+    $original = [string[]]@($State.Grid.Columns | Sort-Object Index | ForEach-Object DataPropertyName)
+    # The grid also raises this event while it builds its columns. Only an order that differs from
+    # the script's is kept, so a report nobody rearranged follows changes to the script's order.
+    if (($order -join '|') -eq ($original -join '|')) {
+        if ($script:ColumnOrders.ContainsKey($key)) { $script:ColumnOrders.Remove($key) }
+        return
+    }
+    $script:ColumnOrders[$key] = $order
+    Set-Status 'Column order changed. Use Save Settings to keep it for next time.'
+}
+
+function Reset-ColumnOrder($State) {
+    # Back to the order the script writes the columns in
+    $key = Get-ReportKey $State
+    if ($key) { $script:ColumnOrders.Remove($key) }
+    $State.ApplyingOrder = $true
+    try { foreach ($column in @($State.Grid.Columns | Sort-Object Index)) { $column.DisplayIndex = $column.Index } }
+    finally { $State.ApplyingOrder = $false }
+    Set-Status 'Column order reset. Use Save Settings to keep it for next time.'
 }
 
 function Set-ColumnWidths($State) {
@@ -1009,7 +1066,8 @@ function New-InventoryTab($Definition) {
     $openFile = New-Button 'Open CSV...' 'Show another report file.'
     $export = New-Button 'Export Filtered Report' 'Save the rows and columns shown, in the order shown, to a new CSV.'
     $clearFilters = New-Button 'Clear Filters' 'Remove all column filters and the search text.'
-    $toolbar.Controls.AddRange(@($state.RunButton, $state.CancelButton, $openFolder, $reportLabel, $state.ReportBox, $openFile, $export, $clearFilters))
+    $resetColumns = New-Button 'Reset Columns' 'Put the columns of this report back in their original order.'
+    $toolbar.Controls.AddRange(@($state.RunButton, $state.CancelButton, $openFolder, $reportLabel, $state.ReportBox, $openFile, $export, $clearFilters, $resetColumns))
 
     if ($Definition.Name -eq 'Collections') {
         $preview = New-Button 'Preview Deletion' "Save the '$($script:MarkColumn)' marks and show which marked collections would be deleted. Nothing is deleted."
@@ -1035,7 +1093,7 @@ function New-InventoryTab($Definition) {
     $searchLabel = New-Object System.Windows.Forms.Label -Property @{ Text = 'Search:'; AutoSize = $true; Anchor = 'Left'; Margin = New-Object System.Windows.Forms.Padding 3, 6, 3, 3 }
     $state.SearchBox = New-Object System.Windows.Forms.TextBox -Property @{ Dock = 'Fill' }
     $script:ToolTip.SetToolTip($state.SearchBox, 'Show rows containing this text in any column.')
-    $hint = New-Object System.Windows.Forms.Label -Property @{ Text = 'Click a column header to sort; right-click it to filter. Shift + mouse wheel scrolls sideways.'; AutoSize = $true; Anchor = 'Left'; ForeColor = [System.Drawing.SystemColors]::GrayText; Margin = New-Object System.Windows.Forms.Padding 12, 6, 3, 3 }
+    $hint = New-Object System.Windows.Forms.Label -Property @{ Text = 'Click a column header to sort, right-click it to filter, drag it to move the column. Shift + mouse wheel scrolls sideways.'; AutoSize = $true; Anchor = 'Left'; ForeColor = [System.Drawing.SystemColors]::GrayText; Margin = New-Object System.Windows.Forms.Padding 12, 6, 3, 3 }
     $state.CountLabel = New-Object System.Windows.Forms.Label -Property @{ Text = 'No report loaded.'; AutoSize = $true; Anchor = 'Right'; Margin = New-Object System.Windows.Forms.Padding 3, 6, 3, 3 }
     $filterBar.Controls.AddRange(@($searchLabel, $state.SearchBox, $hint, $state.CountLabel))
     $layout.Controls.Add($filterBar, 0, 2)
@@ -1054,7 +1112,7 @@ function New-InventoryTab($Definition) {
     $state.Grid = $grid
     $layout.Controls.Add($grid, 0, 3)
 
-    foreach ($control in $state.RunButton, $state.CancelButton, $openFolder, $state.ReportBox, $openFile, $export, $clearFilters, $state.SearchBox, $grid) {
+    foreach ($control in $state.RunButton, $state.CancelButton, $openFolder, $state.ReportBox, $openFile, $export, $clearFilters, $resetColumns, $state.SearchBox, $grid) {
         $control.Tag = $Definition.Name
     }
     $state.RunButton.Add_Click({ Invoke-UiAction { Start-Inventory $script:TabStates[$this.Tag] } })
@@ -1090,6 +1148,9 @@ function New-InventoryTab($Definition) {
         $cell = $this.Rows[$_.RowIndex].Cells[$_.ColumnIndex]
         if ("$($cell.Value)".Trim() -ieq 'y') { $cell.Value = 'Y' }
     })
+    $resetColumns.Add_Click({ Invoke-UiAction { Reset-ColumnOrder $script:TabStates[$this.Tag] } })
+    # Columns are moved by dragging their header (AllowUserToOrderColumns)
+    $grid.Add_ColumnDisplayIndexChanged({ Invoke-UiAction { Save-ColumnOrder $script:TabStates[$this.Tag] } })
     $grid.Add_DataError({ $_.ThrowException = $false })
     # Shift + mouse wheel scrolls sideways through the columns, as in Excel
     $grid.Add_MouseWheel({

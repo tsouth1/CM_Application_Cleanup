@@ -8,6 +8,7 @@
     ConfigurationManager cmdlets when there are hundreds of applications and task sequences.
 
     For each application (latest revision) the script reports:
+      TSandDeploymentCount Deployments plus the number of task sequences that install it
       Status               Active, or Retired when the application is retired (IsExpired)
       Deployments          Number of deployments of the application
       DeploymentTypes      Deployment type names and technology, in priority order
@@ -455,32 +456,37 @@ $applications = foreach ($row in $appRows) {
         }
     }
 
+    $deployments = [int](Get-Column $row 'NumberOfDeployments')
+
+    # Usage and age come first so cleanup candidates are easy to spot in the report
     [pscustomobject]@{
-        Application         = $name
-        ObjectPath          = $objectPath
-        Manufacturer        = Get-Column $row 'Manufacturer'
-        SoftwareVersion     = Get-Column $row 'SoftwareVersion'
-        Status              = $status
-        IsSuperseded        = (Get-Column $row 'IsSuperseded') -eq $true
-        Deployments         = [int](Get-Column $row 'NumberOfDeployments')
-        DeploymentTypeCount = $appDts.Count
-        DeploymentTypes     = ($appDts | ForEach-Object { "$($_.Name) ($($_.Technology))" }) -join '; '
-        ContentLocations    = (@($appDts | ForEach-Object { $_.ContentLocation -split '; ' }) |
-                                Where-Object { $_ } | Select-Object -Unique) -join '; '
-        SizeKB              = ConvertTo-KB ($appContentSizes.Values | Measure-Object -Sum).Sum
-        TaskSequenceCount   = $tsRefs.Count
-        TaskSequences       = ($tsRefs | ForEach-Object { "$($_.TaskSequenceName) ($($_.TaskSequenceID))" }) -join '; '
-        AllowTSInstall      = $digest.AllowTSInstall
+        Application          = $name
+        # Deployments of the application plus task sequences that install it; 0 means neither
+        TSandDeploymentCount = $tsRefs.Count + $deployments
+        SizeKB               = ConvertTo-KB ($appContentSizes.Values | Measure-Object -Sum).Sum
+        DateCreated          = Get-Column $row 'DateCreated'
+        DateLastModified     = Get-Column $row 'DateLastModified'
+        CreatedBy            = Get-Column $row 'CreatedBy'
+        ObjectPath           = $objectPath
+        Manufacturer         = Get-Column $row 'Manufacturer'
+        SoftwareVersion      = Get-Column $row 'SoftwareVersion'
+        Status               = $status
+        IsSuperseded         = (Get-Column $row 'IsSuperseded') -eq $true
+        Deployments          = $deployments
+        DeploymentTypeCount  = $appDts.Count
+        DeploymentTypes      = ($appDts | ForEach-Object { "$($_.Name) ($($_.Technology))" }) -join '; '
+        ContentLocations     = (@($appDts | ForEach-Object { $_.ContentLocation -split '; ' }) |
+                                 Where-Object { $_ } | Select-Object -Unique) -join '; '
+        TaskSequenceCount    = $tsRefs.Count
+        TaskSequences        = ($tsRefs | ForEach-Object { "$($_.TaskSequenceName) ($($_.TaskSequenceID))" }) -join '; '
+        AllowTSInstall       = $digest.AllowTSInstall
         # NumberOfDependedDTs counts deployment types that depend on this application; older
         # sites may only have NumberOfDependentDTs
-        DependentDTs        = [int]$(if ($row.Table.Columns.Contains('NumberOfDependedDTs')) { Get-Column $row 'NumberOfDependedDTs' }
-                                     else { Get-Column $row 'NumberOfDependentDTs' })
-        CreatedBy           = Get-Column $row 'CreatedBy'
-        DateCreated         = Get-Column $row 'DateCreated'
-        LastModifiedBy      = Get-Column $row 'LastModifiedBy'
-        DateLastModified    = Get-Column $row 'DateLastModified'
-        ModelName           = $row.ModelName
-        CI_ID               = $row.CI_ID
+        DependentDTs         = [int]$(if ($row.Table.Columns.Contains('NumberOfDependedDTs')) { Get-Column $row 'NumberOfDependedDTs' }
+                                      else { Get-Column $row 'NumberOfDependentDTs' })
+        LastModifiedBy       = Get-Column $row 'LastModifiedBy'
+        ModelName            = $row.ModelName
+        CI_ID                = $row.CI_ID
     }
 }
 $applications = @($applications | Sort-Object -Property Application)
