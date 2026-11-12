@@ -249,12 +249,19 @@ To restore a deleted collection, use `Restore-DeletedCollections.ps1` (or **Rest
 
 ## Restore-DeletedCollections.ps1
 
-Imports MOF backups written by `Delete-MarkedCollections.ps1`. Each MOF is read first, and the collection is skipped, with the reason logged, when a collection with the same name already exists, its limiting collection no longer exists, or a collection named by its include or exclude rules no longer exists. Otherwise it is imported with `Import-CMCollection` and, when the JSON backup next to the MOF records a console folder that still exists, moved back to that folder.
+Imports MOF backups written by `Delete-MarkedCollections.ps1` with `Import-CMCollection`. Restored collections get new collection IDs, so:
 
-Restored collections get new collection IDs. Every action is appended to `RestoreLog.csv` in `-OutputDirectory` (default: the folder above the MOF's `DeletionBackups` folder, i.e. the collection report folder) with the old and new IDs.
+- **Collections that depend on each other can be restored together.** The MOFs are restored in dependency order (a collection's limiting collection and the collections its include and exclude rules name go first), and references to a restored collection's old ID in the MOFs restored after it are changed to its new ID: limiting collection, include and exclude rules, and collection IDs in query rules. Collections restored in earlier runs are matched the same way, from `RestoreLog.csv`. A collection limited to another can only be deleted after it, so restore them in the same run, or the parent first.
+- **A collection is skipped**, with the reason logged, when a collection with the same name already exists, or when its limiting collection or a collection named by its include or exclude rules no longer exists and is not being restored.
+- **`-UseDefaultLimitingCollection`** restores a collection whose limiting collection no longer exists by limiting it to All Systems (device collections) or All Users and User Groups (user collections) instead of skipping it. This can widen its membership; each change is logged. In the app it is the checkbox at the bottom of **Restore Collections**.
+
+When the JSON backup next to the MOF records a console folder that still exists, the collection is moved back to that folder. Every action is appended to `RestoreLog.csv` in `-OutputDirectory` (default: the folder above the MOF's `DeletionBackups` folder, i.e. the collection report folder) with the old and new IDs. The MOF backups themselves are never changed; references are rewritten in a temporary copy.
 
 ```powershell
 .\Restore-DeletedCollections.ps1 -MofPath .\CollectionInventory\DeletionBackups\PS10012A_20261112-035449.mof -SiteServer CM01 -SiteCode PS1
+
+# Everything in the backup folder, limiting orphans to All Systems / All Users and User Groups
+.\Restore-DeletedCollections.ps1 -MofPath (Get-ChildItem .\CollectionInventory\DeletionBackups\*.mof) -SiteServer CM01 -SiteCode PS1 -UseDefaultLimitingCollection
 ```
 
 Requires the ConfigMgr console on the machine running it, for `Import-CMCollection`.

@@ -816,19 +816,24 @@ function Get-CollectionBackups([string]$Folder) {
 
 function Show-RestoreDialog([object[]]$Backups, [string]$Folder) {
     # Lets the user tick the backups to restore, or browse for other MOF files. Returns the MOF
-    # paths chosen, or nothing when cancelled.
+    # paths chosen and the limiting collection option, or nothing when cancelled.
     $dialog = New-Object System.Windows.Forms.Form -Property @{
         Text = "$($script:AppTitle) - Restore Collections"; StartPosition = 'CenterParent'
         Size = New-Object System.Drawing.Size 900, 480; MinimumSize = New-Object System.Drawing.Size 600, 300
         ShowInTaskbar = $false; Font = $script:MainForm.Font; MinimizeBox = $false
     }
-    $layout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ Dock = 'Fill'; ColumnCount = 1; RowCount = 3; Padding = 8 }
-    foreach ($style in 'AutoSize', 'Percent', 'AutoSize') { [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle $style, 100)) }
+    $layout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ Dock = 'Fill'; ColumnCount = 1; RowCount = 4; Padding = 8 }
+    foreach ($style in 'AutoSize', 'Percent', 'AutoSize', 'AutoSize') { [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle $style, 100)) }
 
     $intro = New-Object System.Windows.Forms.Label -Property @{
         AutoSize = $true; MaximumSize = New-Object System.Drawing.Size 860, 0; Margin = New-Object System.Windows.Forms.Padding 3, 3, 3, 8
-        Text = "Tick the collections to restore from their MOF backups. Each comes back with a new collection ID, in its original console folder when that folder still exists. A collection is skipped if one with the same name already exists, or if its limiting collection or a collection named by its include or exclude rules has been deleted.`n`nDeleted collections from $(Join-Path $Folder 'DeletionLog.csv'):"
+        Text = "Tick the collections to restore from their MOF backups. Each comes back with a new collection ID, in its original console folder when that folder still exists. Collections that depend on each other can be restored together: a limiting or included collection is restored first and the others are pointed at its new ID. A collection is skipped if one with the same name already exists, or if a collection it depends on no longer exists and is not being restored.`n`nDeleted collections from $(Join-Path $Folder 'DeletionLog.csv'):"
     }
+    $useDefaultLimit = New-Object System.Windows.Forms.CheckBox -Property @{
+        AutoSize = $true; Margin = New-Object System.Windows.Forms.Padding 3, 8, 3, 3
+        Text = 'If a limiting collection no longer exists, limit to All Systems (device collections) or All Users and User Groups (user collections) instead of skipping'
+    }
+    $script:ToolTip.SetToolTip($useDefaultLimit, 'This can widen which members the restored collection can have. Each change is logged in the Log tab and RestoreLog.csv.')
     $list = New-Object System.Windows.Forms.ListView -Property @{ Dock = 'Fill'; View = 'Details'; CheckBoxes = $true; FullRowSelect = $true; GridLines = $true }
     foreach ($column in @(@('Deleted', 140), @('Collection', 280), @('Old ID', 90), @('Status', 140), @('MOF backup', 400))) {
         [void]$list.Columns.Add($column[0], $column[1])
@@ -854,7 +859,7 @@ function Show-RestoreDialog([object[]]$Backups, [string]$Folder) {
     $cancel = New-Button 'Cancel' ''
     $cancel.DialogResult = 'Cancel'
     $buttons.Controls.AddRange(@($browse, $selectAll, $spacer, $restore, $cancel))
-    $layout.Controls.AddRange(@($intro, $list, $buttons))
+    $layout.Controls.AddRange(@($intro, $list, $useDefaultLimit, $buttons))
     $dialog.Controls.Add($layout)
     $dialog.CancelButton = $cancel
 
@@ -877,9 +882,9 @@ function Show-RestoreDialog([object[]]$Backups, [string]$Folder) {
     })
 
     $result = $dialog.ShowDialog($script:MainForm)
-    $chosen = @($list.CheckedItems | ForEach-Object { [string]$_.Tag })
+    $choice = @{ Files = [string[]]@($list.CheckedItems | ForEach-Object { [string]$_.Tag }); UseDefaultLimit = $useDefaultLimit.Checked }
     $dialog.Dispose()
-    if ($result -eq 'OK') { return , [string[]]$chosen }
+    if ($result -eq 'OK') { return $choice }
 }
 
 function Start-CollectionRestore($State) {
@@ -891,13 +896,16 @@ function Start-CollectionRestore($State) {
     if ($missing.Count) { Show-Message "Fill in these settings first:`n`n  $($missing -join "`n  ")" 'Warning'; return }
 
     $folder = Get-TabFolder $State
-    $mofFiles = Show-RestoreDialog (Get-CollectionBackups $folder) $folder
-    if (-not $mofFiles) { return }
+    $choice = Show-RestoreDialog (Get-CollectionBackups $folder) $folder
+    if (-not $choice) { return }
+    $mofFiles = $choice.Files
 
-    $answer = [System.Windows.Forms.MessageBox]::Show($script:MainForm, "Restore $($mofFiles.Count) collection(s) on site $($settings.SiteCode)?`n`nThey are created with new collection IDs.", $script:AppTitle, 'YesNo', 'Question')
+    $limitNote = if ($choice.UseDefaultLimit) { "`n`nCollections whose limiting collection no longer exists will be limited to All Systems or All Users and User Groups." } else { '' }
+    $answer = [System.Windows.Forms.MessageBox]::Show($script:MainForm, "Restore $($mofFiles.Count) collection(s) on site $($settings.SiteCode)?`n`nThey are created with new collection IDs.$limitNote", $script:AppTitle, 'YesNo', 'Question')
     if ($answer -ne 'Yes') { Write-AppLog 'Restore Collections cancelled; nothing was restored.'; return }
 
     $parameters = @{ MofPath = $mofFiles; SiteServer = $settings.SiteServer; SiteCode = $settings.SiteCode; OutputDirectory = $folder }
+    if ($choice.UseDefaultLimit) { $parameters.UseDefaultLimitingCollection = $true }
     $script:Tabs.SelectedTab = $script:LogPage
     Start-ScriptJob -State $State -Title 'Restore collections' -ScriptName $script:RestoreScript -Parameters $parameters -Kind 'Restore'
 }
