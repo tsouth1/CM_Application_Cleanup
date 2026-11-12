@@ -19,7 +19,8 @@
 
     The Collections tab also runs Delete-MarkedCollections.ps1: enter Y in the 'to be deleted'
     column of the Collections report, then preview or delete. The marks are saved to the report
-    CSV first, and deleting asks you to type DELETE.
+    CSV first, and deleting asks you to type DELETE. Restore Collections runs
+    Restore-DeletedCollections.ps1 on the MOF backups of deleted collections you choose.
 
     Reports are written to a subfolder per tab under the output folder: Applications, Packages,
     Collections and TaskSequences.
@@ -72,6 +73,7 @@ $script:TabDefinitions = @(
 )
 
 $script:DeleteScript = 'Delete-MarkedCollections.ps1'
+$script:RestoreScript = 'Restore-DeletedCollections.ps1'
 $script:MarkColumn = 'to be deleted'
 
 $script:SettingBoxes = @{}     # setting name -> TextBox
@@ -785,6 +787,121 @@ function Start-CollectionDeletion($State, [bool]$Execute) {
     Start-ScriptJob -State $State -Title $title -ScriptName $script:DeleteScript -Parameters $parameters -Kind 'Delete'
 }
 
+function Get-CollectionBackups([string]$Folder) {
+    # Collections deleted with a MOF backup, from DeletionLog.csv in the collection report folder,
+    # newest first. Status shows when a backup has already been restored, from RestoreLog.csv.
+    $deletionLog = Join-Path $Folder 'DeletionLog.csv'
+    if (-not (Test-Path $deletionLog)) { return @() }
+
+    $restoredAs = @{}
+    $restoreLog = Join-Path $Folder 'RestoreLog.csv'
+    if (Test-Path $restoreLog) {
+        foreach ($entry in Import-Csv -Path $restoreLog -Encoding UTF8 | Where-Object Action -eq 'Restored') { $restoredAs[$entry.MofFile] = $entry.NewCollectionID }
+    }
+
+    $backups = foreach ($entry in Import-Csv -Path $deletionLog -Encoding UTF8 | Where-Object Action -eq 'Deleted') {
+        # BackupFile lists the JSON and MOF backups separated by "; "
+        $mof = @("$($entry.BackupFile)" -split ';\s*' | Where-Object { $_ -like '*.mof' }) | Select-Object -First 1
+        if (-not $mof -or -not (Test-Path -LiteralPath $mof)) { continue }
+        [pscustomobject]@{
+            Deleted        = $entry.Timestamp
+            CollectionName = $entry.CollectionName
+            CollectionID   = $entry.CollectionID
+            Status         = if ($restoredAs.ContainsKey($mof)) { "Restored as $($restoredAs[$mof])" } else { '' }
+            MofFile        = $mof
+        }
+    }
+    return @($backups | Sort-Object -Property Deleted -Descending)
+}
+
+function Show-RestoreDialog([object[]]$Backups, [string]$Folder) {
+    # Lets the user tick the backups to restore, or browse for other MOF files. Returns the MOF
+    # paths chosen, or nothing when cancelled.
+    $dialog = New-Object System.Windows.Forms.Form -Property @{
+        Text = "$($script:AppTitle) - Restore Collections"; StartPosition = 'CenterParent'
+        Size = New-Object System.Drawing.Size 900, 480; MinimumSize = New-Object System.Drawing.Size 600, 300
+        ShowInTaskbar = $false; Font = $script:MainForm.Font; MinimizeBox = $false
+    }
+    $layout = New-Object System.Windows.Forms.TableLayoutPanel -Property @{ Dock = 'Fill'; ColumnCount = 1; RowCount = 3; Padding = 8 }
+    foreach ($style in 'AutoSize', 'Percent', 'AutoSize') { [void]$layout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle $style, 100)) }
+
+    $intro = New-Object System.Windows.Forms.Label -Property @{
+        AutoSize = $true; MaximumSize = New-Object System.Drawing.Size 860, 0; Margin = New-Object System.Windows.Forms.Padding 3, 3, 3, 8
+        Text = "Tick the collections to restore from their MOF backups. Each comes back with a new collection ID, in its original console folder when that folder still exists. A collection is skipped if one with the same name already exists, or if its limiting collection or a collection named by its include or exclude rules has been deleted.`n`nDeleted collections from $(Join-Path $Folder 'DeletionLog.csv'):"
+    }
+    $list = New-Object System.Windows.Forms.ListView -Property @{ Dock = 'Fill'; View = 'Details'; CheckBoxes = $true; FullRowSelect = $true; GridLines = $true }
+    foreach ($column in @(@('Deleted', 140), @('Collection', 280), @('Old ID', 90), @('Status', 140), @('MOF backup', 400))) {
+        [void]$list.Columns.Add($column[0], $column[1])
+    }
+    $addItem = {
+        param($Deleted, $Name, $Id, $Status, $Mof)
+        # The leading comma passes the cell texts as one array argument rather than five
+        $item = New-Object System.Windows.Forms.ListViewItem -ArgumentList (, [string[]]@($Deleted, $Name, $Id, $Status, (Split-Path -Leaf $Mof)))
+        $item.Tag = $Mof
+        $item.ToolTipText = $Mof
+        if ($Status) { $item.ForeColor = [System.Drawing.SystemColors]::GrayText }
+        [void]$list.Items.Add($item)
+        return $item
+    }
+    foreach ($backup in $Backups) { [void](& $addItem $backup.Deleted $backup.CollectionName $backup.CollectionID $backup.Status $backup.MofFile) }
+    $list.ShowItemToolTips = $true
+
+    $buttons = New-Object System.Windows.Forms.FlowLayoutPanel -Property @{ Dock = 'Fill'; AutoSize = $true; Margin = 0 }
+    $browse = New-Button 'Browse for MOF...' 'Add MOF backups that are not in the deletion log, e.g. from another folder.'
+    $selectAll = New-Button 'Select All' 'Tick every backup not yet restored.'
+    $spacer = New-Object System.Windows.Forms.Label -Property @{ AutoSize = $false; Width = 300; Height = 1 }
+    $restore = New-Button 'Restore Selected' 'Restore the ticked collections.'
+    $cancel = New-Button 'Cancel' ''
+    $cancel.DialogResult = 'Cancel'
+    $buttons.Controls.AddRange(@($browse, $selectAll, $spacer, $restore, $cancel))
+    $layout.Controls.AddRange(@($intro, $list, $buttons))
+    $dialog.Controls.Add($layout)
+    $dialog.CancelButton = $cancel
+
+    $browse.Add_Click({
+        $openDialog = New-Object System.Windows.Forms.OpenFileDialog -Property @{ Filter = 'Collection MOF backups (*.mof)|*.mof'; Multiselect = $true; Title = 'Add MOF backups' }
+        $backupFolder = Join-Path $Folder 'DeletionBackups'
+        if (Test-Path $backupFolder) { $openDialog.InitialDirectory = $backupFolder }
+        if ($openDialog.ShowDialog($dialog) -eq 'OK') {
+            foreach ($file in $openDialog.FileNames) {
+                if (@($list.Items | Where-Object { $_.Tag -eq $file }).Count) { continue }
+                $id = if ((Split-Path -Leaf $file) -match '^([A-Za-z0-9]{8})_') { $Matches[1] } else { '' }
+                (& $addItem '' '(from file)' $id '' $file).Checked = $true
+            }
+        }
+    })
+    $selectAll.Add_Click({ foreach ($item in $list.Items) { $item.Checked = -not $item.SubItems[3].Text } })
+    $restore.Add_Click({
+        if (-not $list.CheckedItems.Count) { [void][System.Windows.Forms.MessageBox]::Show($dialog, 'Tick at least one collection to restore.', $script:AppTitle, 'OK', 'Information'); return }
+        $dialog.DialogResult = 'OK'
+    })
+
+    $result = $dialog.ShowDialog($script:MainForm)
+    $chosen = @($list.CheckedItems | ForEach-Object { [string]$_.Tag })
+    $dialog.Dispose()
+    if ($result -eq 'OK') { return , [string[]]$chosen }
+}
+
+function Start-CollectionRestore($State) {
+    $settings = Get-Settings
+    $missing = @()
+    if (-not $settings.SiteServer) { $missing += 'Site server' }
+    if (-not $settings.SiteCode) { $missing += 'Site code' }
+    if (-not $settings.OutputDirectory) { $missing += 'Output folder' }
+    if ($missing.Count) { Show-Message "Fill in these settings first:`n`n  $($missing -join "`n  ")" 'Warning'; return }
+
+    $folder = Get-TabFolder $State
+    $mofFiles = Show-RestoreDialog (Get-CollectionBackups $folder) $folder
+    if (-not $mofFiles) { return }
+
+    $answer = [System.Windows.Forms.MessageBox]::Show($script:MainForm, "Restore $($mofFiles.Count) collection(s) on site $($settings.SiteCode)?`n`nThey are created with new collection IDs.", $script:AppTitle, 'YesNo', 'Question')
+    if ($answer -ne 'Yes') { Write-AppLog 'Restore Collections cancelled; nothing was restored.'; return }
+
+    $parameters = @{ MofPath = $mofFiles; SiteServer = $settings.SiteServer; SiteCode = $settings.SiteCode; OutputDirectory = $folder }
+    $script:Tabs.SelectedTab = $script:LogPage
+    Start-ScriptJob -State $State -Title 'Restore collections' -ScriptName $script:RestoreScript -Parameters $parameters -Kind 'Restore'
+}
+
 #endregion
 
 #region Form
@@ -890,12 +1007,15 @@ function New-InventoryTab($Definition) {
         $preview = New-Button 'Preview Deletion' "Save the '$($script:MarkColumn)' marks and show which marked collections would be deleted. Nothing is deleted."
         $delete = New-Button 'Delete Marked Collections' "Save the '$($script:MarkColumn)' marks, check each marked collection against the live site, back it up and delete it."
         $delete.ForeColor = [System.Drawing.Color]::Firebrick
-        $toolbar.Controls.AddRange(@($preview, $delete))
-        $state.ActionButtons = @($preview, $delete)
+        $restore = New-Button 'Restore Collections...' 'Restore deleted collections from the MOF backups written when they were deleted.'
+        $toolbar.Controls.AddRange(@($preview, $delete, $restore))
+        $state.ActionButtons = @($preview, $delete, $restore)
         $preview.Tag = $Definition.Name
         $delete.Tag = $Definition.Name
+        $restore.Tag = $Definition.Name
         $preview.Add_Click({ Invoke-UiAction { Start-CollectionDeletion $script:TabStates[$this.Tag] $false } })
         $delete.Add_Click({ Invoke-UiAction { Start-CollectionDeletion $script:TabStates[$this.Tag] $true } })
+        $restore.Add_Click({ Invoke-UiAction { Start-CollectionRestore $script:TabStates[$this.Tag] } })
     }
     $layout.Controls.Add($toolbar, 0, 1)
 

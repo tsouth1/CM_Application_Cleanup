@@ -10,8 +10,9 @@ Tools for finding Configuration Manager (ConfigMgr / MECM) applications, package
 | `Get-CMTaskSequenceInventory.ps1` | Task sequence inventory | Site database (SQL) |
 | `Collection-Inventory.v4.ps1` | Collection inventory with collection-to-collection references | SMS Provider (WMI) |
 | `Delete-MarkedCollections.ps1` | Deletes collections marked `Y` in a collection inventory, after checking and backing up each one | SMS Provider and ConfigMgr console module |
+| `Restore-DeletedCollections.ps1` | Restores deleted collections from the MOF backups written by `Delete-MarkedCollections.ps1` | SMS Provider and ConfigMgr console module |
 
-All scripts except `Delete-MarkedCollections.ps1` are read-only.
+All scripts except `Delete-MarkedCollections.ps1` and `Restore-DeletedCollections.ps1` are read-only.
 
 ## Standard parameters
 
@@ -50,6 +51,8 @@ To delete collections from the Collections tab:
 1. Show the Collections report and enter `Y` in the green `to be deleted` column of each collection to delete.
 2. **Preview Deletion** saves the marks to the report CSV and runs `Delete-MarkedCollections.ps1` without deleting anything. The Log tab shows which collections would be deleted and which are skipped, and why.
 3. **Delete Marked Collections** saves the marks, asks you to type `DELETE`, then runs the script with `-Execute`. Each collection is checked against the live site and backed up before it is deleted.
+
+**Restore Collections...** lists the collections in the Collections folder's `DeletionLog.csv` that have a MOF backup, newest first, with any already restored shown in grey with their new ID. Tick the ones to restore (or **Browse for MOF...** to add backups from elsewhere), click **Restore Selected** and confirm; `Restore-DeletedCollections.ps1` runs in the background and its log is shown in the Log tab.
 
 Requirements: Windows PowerShell 5.1, and the access each script needs (below). The scripts must be in the same folder as the app.
 
@@ -242,7 +245,19 @@ Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses.
 
 Deletes the collections marked `Y` in the `to be deleted` column of a `Collections_<timestamp>.csv`. Each marked collection is checked against the live site first and skipped, with the reason logged, when it is built in, no longer exists, has been renamed, has deployments (including client settings and antimalware policies), is referenced by another collection, or is listed twice. Each collection that passes is backed up before it is deleted, to two files in `DeletionBackups`: `<CollectionID>_<run>.json` with its properties and membership rules, and `<CollectionID>_<run>.mof` exported with `Export-CMCollection`. If either backup fails, the collection is not deleted.
 
-To restore a deleted collection, import its MOF with the console's **Import Collections** wizard (Device or User Collections node) or with `Import-CMCollection -ImportFilePath <file>.mof`. The collection comes back with a new collection ID, so update anything that referred to the old ID. Its limiting collection and any collections its include or exclude rules name must still exist.
+To restore a deleted collection, use `Restore-DeletedCollections.ps1` (or **Restore Collections...** in the app), or import its MOF with the console's **Import Collections** wizard or `Import-CMCollection`. The collection comes back with a new collection ID, so update anything that referred to the old ID. Its limiting collection and any collections its include or exclude rules name must still exist.
+
+## Restore-DeletedCollections.ps1
+
+Imports MOF backups written by `Delete-MarkedCollections.ps1`. Each MOF is read first, and the collection is skipped, with the reason logged, when a collection with the same name already exists, its limiting collection no longer exists, or a collection named by its include or exclude rules no longer exists. Otherwise it is imported with `Import-CMCollection` and, when the JSON backup next to the MOF records a console folder that still exists, moved back to that folder.
+
+Restored collections get new collection IDs. Every action is appended to `RestoreLog.csv` in `-OutputDirectory` (default: the folder above the MOF's `DeletionBackups` folder, i.e. the collection report folder) with the old and new IDs.
+
+```powershell
+.\Restore-DeletedCollections.ps1 -MofPath .\CollectionInventory\DeletionBackups\PS10012A_20261112-035449.mof -SiteServer CM01 -SiteCode PS1
+```
+
+Requires the ConfigMgr console on the machine running it, for `Import-CMCollection`.
 
 Without `-Execute` it only shows what it would do. With `-Execute` it asks you to type `DELETE`, unless `-Force` is passed (the Maintenance App asks first and passes `-Force`). Every action is appended to `DeletionLog.csv` and backups go to `DeletionBackups` in `-OutputDirectory`, which defaults to the folder of the input CSV.
 
