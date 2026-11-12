@@ -240,7 +240,9 @@ Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses.
 
 ## Delete-MarkedCollections.ps1
 
-Deletes the collections marked `Y` in the `to be deleted` column of a `Collections_<timestamp>.csv`. Each marked collection is checked against the live site first and skipped, with the reason logged, when it is built in, no longer exists, has been renamed, has deployments (including client settings and antimalware policies), is referenced by another collection, or is listed twice. Each collection that passes is backed up to JSON before it is deleted; if the backup fails it is not deleted.
+Deletes the collections marked `Y` in the `to be deleted` column of a `Collections_<timestamp>.csv`. Each marked collection is checked against the live site first and skipped, with the reason logged, when it is built in, no longer exists, has been renamed, has deployments (including client settings and antimalware policies), is referenced by another collection, or is listed twice. Each collection that passes is backed up before it is deleted, to two files in `DeletionBackups`: `<CollectionID>_<run>.json` with its properties and membership rules, and `<CollectionID>_<run>.mof` exported with `Export-CMCollection`. If either backup fails, the collection is not deleted.
+
+To restore a deleted collection, import its MOF with the console's **Import Collections** wizard (Device or User Collections node) or with `Import-CMCollection -ImportFilePath <file>.mof`. The collection comes back with a new collection ID, so update anything that referred to the old ID. Its limiting collection and any collections its include or exclude rules name must still exist.
 
 Without `-Execute` it only shows what it would do. With `-Execute` it asks you to type `DELETE`, unless `-Force` is passed (the Maintenance App asks first and passes `-Force`). Every action is appended to `DeletionLog.csv` and backups go to `DeletionBackups` in `-OutputDirectory`, which defaults to the folder of the input CSV.
 

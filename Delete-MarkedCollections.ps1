@@ -17,11 +17,18 @@
       - The CSV must not list the same collection ID twice.
 
     Rows that fail a check are skipped and the reason is logged. Rows that pass are backed up
-    to a JSON file (collection properties and membership rules) BEFORE deletion. If the backup
-    fails, that collection is not deleted.
+    BEFORE deletion to two files in the DeletionBackups subfolder of -OutputDirectory:
 
-    Every action is appended to DeletionLog.csv in -OutputDirectory, and backups are written to
-    its DeletionBackups subfolder.
+      <CollectionID>_<run>.json  collection properties and membership rules, for reference
+      <CollectionID>_<run>.mof   Export-CMCollection export, which restores the collection with
+                                 Import-CMCollection or the console's Import Collections wizard
+
+    If either backup fails, that collection is not deleted. A MOF import recreates the collection
+    with a new collection ID; its limiting collection and any collections its include or exclude
+    rules name must still exist.
+
+    Every action is appended to DeletionLog.csv in -OutputDirectory; its BackupFile column lists
+    both backup files.
 
     Without -Execute the script only prints what it would do. With -Execute it lists the
     collections to delete and asks you to type DELETE before it continues, unless -Force is
@@ -258,8 +265,11 @@ try {
     $deleted = 0; $failed = 0
     foreach ($item in $toDelete) {
         $backupFile = Join-Path $BackupFolder ("{0}_{1}.json" -f $item.ID, $runStamp)
+        $mofFile    = Join-Path $BackupFolder ("{0}_{1}.mof" -f $item.ID, $runStamp)
+        # Both backups are recorded in the log's BackupFile column
+        $backupFiles = "$backupFile; $mofFile"
         try {
-            # Back up first. If this fails, the collection is not deleted.
+            # Back up first. If either backup fails, the collection is not deleted.
             $rules = @(($item.Live | Get-CimInstance -CimSession $session).CollectionRules)
             $backup = [ordered]@{
                 ExportedAt = (Get-Date -Format 'o')
@@ -269,6 +279,11 @@ try {
             }
             $backup | ConvertTo-Json -Depth 6 | Set-Content -Path $backupFile -Encoding UTF8
             if (-not (Test-Path $backupFile)) { throw 'Backup file was not written.' }
+
+            # The MOF restores the collection with Import-CMCollection or the console's Import
+            # Collections wizard
+            Export-CMCollection -CollectionId $item.ID -ExportFilePath $mofFile -ExportComment "Backup before deletion, run $runStamp" -Force
+            if (-not (Test-Path $mofFile) -or -not (Get-Item $mofFile).Length) { throw 'MOF export file was not written.' }
         }
         catch {
             Write-DeletionLog 'Failed' $item.ID $item.Name "Backup failed, not deleted: $($_.Exception.Message)"
@@ -283,12 +298,12 @@ try {
             } else {
                 Remove-CMDeviceCollection -Id $item.ID -Force
             }
-            Write-DeletionLog 'Deleted' $item.ID $item.Name 'Deleted' $backupFile
-            Write-Log "Deleted $($item.ID) $($item.Name)"
+            Write-DeletionLog 'Deleted' $item.ID $item.Name 'Deleted' $backupFiles
+            Write-Log "Deleted $($item.ID) $($item.Name); backups: $(Split-Path -Leaf $backupFile), $(Split-Path -Leaf $mofFile)"
             $deleted++
         }
         catch {
-            Write-DeletionLog 'Failed' $item.ID $item.Name "Delete failed: $($_.Exception.Message)" $backupFile
+            Write-DeletionLog 'Failed' $item.ID $item.Name "Delete failed: $($_.Exception.Message)" $backupFiles
             Write-Log "Failed to delete $($item.ID) $($item.Name): $($_.Exception.Message)" 'ERROR'
             $failed++
         }
