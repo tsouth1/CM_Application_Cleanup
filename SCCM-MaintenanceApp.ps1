@@ -520,6 +520,14 @@ function Show-SelectedReport($State) {
     }
 }
 
+function Move-GridHorizontally([System.Windows.Forms.DataGridView]$Grid, [int]$Delta) {
+    # Scrolls the grid sideways; a mouse wheel notch (120) moves about three columns' worth
+    $columnsWidth = ($Grid.Columns | Where-Object Visible | Measure-Object -Property Width -Sum).Sum
+    $maximum = [math]::Max(0, $columnsWidth - $Grid.DisplayRectangle.Width)
+    $offset = $Grid.HorizontalScrollingOffset + [int]($Delta * 2)
+    $Grid.HorizontalScrollingOffset = [math]::Max(0, [math]::Min($maximum, $offset))
+}
+
 function Update-RowCount($State) {
     if ($null -eq $State.Table) { $State.CountLabel.Text = 'No report loaded.'; return }
     $file = Get-Item -LiteralPath $State.SourceFile
@@ -899,7 +907,7 @@ function New-InventoryTab($Definition) {
     $searchLabel = New-Object System.Windows.Forms.Label -Property @{ Text = 'Search:'; AutoSize = $true; Anchor = 'Left'; Margin = New-Object System.Windows.Forms.Padding 3, 6, 3, 3 }
     $state.SearchBox = New-Object System.Windows.Forms.TextBox -Property @{ Dock = 'Fill' }
     $script:ToolTip.SetToolTip($state.SearchBox, 'Show rows containing this text in any column.')
-    $hint = New-Object System.Windows.Forms.Label -Property @{ Text = 'Click a column header to sort; right-click it to filter.'; AutoSize = $true; Anchor = 'Left'; ForeColor = [System.Drawing.SystemColors]::GrayText; Margin = New-Object System.Windows.Forms.Padding 12, 6, 3, 3 }
+    $hint = New-Object System.Windows.Forms.Label -Property @{ Text = 'Click a column header to sort; right-click it to filter. Shift + mouse wheel scrolls sideways.'; AutoSize = $true; Anchor = 'Left'; ForeColor = [System.Drawing.SystemColors]::GrayText; Margin = New-Object System.Windows.Forms.Padding 12, 6, 3, 3 }
     $state.CountLabel = New-Object System.Windows.Forms.Label -Property @{ Text = 'No report loaded.'; AutoSize = $true; Anchor = 'Right'; Margin = New-Object System.Windows.Forms.Padding 3, 6, 3, 3 }
     $filterBar.Controls.AddRange(@($searchLabel, $state.SearchBox, $hint, $state.CountLabel))
     $layout.Controls.Add($filterBar, 0, 2)
@@ -955,6 +963,13 @@ function New-InventoryTab($Definition) {
         if ("$($cell.Value)".Trim() -ieq 'y') { $cell.Value = 'Y' }
     })
     $grid.Add_DataError({ $_.ThrowException = $false })
+    # Shift + mouse wheel scrolls sideways through the columns, as in Excel
+    $grid.Add_MouseWheel({
+        if ([System.Windows.Forms.Control]::ModifierKeys -band [System.Windows.Forms.Keys]::Shift) {
+            Move-GridHorizontally $this (-$_.Delta)
+            $_.Handled = $true
+        }
+    })
     $grid.Add_DataBindingComplete({ Invoke-UiAction { Set-GridColumns $script:TabStates[$this.Tag] } })
 
     $page.Controls.Add($layout)
@@ -1039,6 +1054,13 @@ function New-MainForm {
         catch { Write-AppLog "Search failed: $($_.Exception.Message)" 'ERROR' }
     })
 
+    # On a screen too small for the window, such as a remote desktop session or a scaled laptop
+    # display, open maximized so the bottom of the grid and its scroll bar are not off screen
+    $form.Add_Load({
+        $area = [System.Windows.Forms.Screen]::FromPoint([System.Windows.Forms.Cursor]::Position).WorkingArea
+        $this.MinimumSize = New-Object System.Drawing.Size ([math]::Min($this.MinimumSize.Width, $area.Width)), ([math]::Min($this.MinimumSize.Height, $area.Height))
+        if ($this.Width -gt $area.Width -or $this.Height -gt $area.Height) { $this.WindowState = 'Maximized' }
+    })
     $form.Add_Shown({
         Invoke-UiAction {
             Import-Settings
