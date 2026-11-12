@@ -52,7 +52,7 @@ $script:SettingDefinitions = [ordered]@{
     LocaleId          = @{ Label = 'Locale ID';         Default = '1033'; Tip = 'Locale for localized application names (1033 = English).' }
     OutputDirectory   = @{ Label = 'Output folder';     Default = (Join-Path $PSScriptRoot 'Reports'); Tip = 'Reports are written to a subfolder per tab under this folder.' }
     ExcludeFolder     = @{ Label = 'Exclude folders';   Default = 'Device Collections\Deployment\Software Center Deployments\Office 365*; Device Collections\Deployment\Security Patches*'; Tip = 'Leave out collections in console folders matching these patterns (* is a wildcard). Separate with semicolons; leave blank to include all folders.' }
-    ExcludeNameSuffix = @{ Label = 'Exclude name suffixes'; Default = '-sec'; Tip = 'Leave out collections whose name ends with any of these values. Separate with semicolons.' }
+    ExcludeName       = @{ Label = 'Exclude names';     Default = '*-sec'; Tip = 'Leave out collections whose name matches any of these patterns. * is a wildcard: *-sec ends with -sec, *Pilot* contains Pilot, Test -* starts with Test -. Separate with semicolons.' }
     ExcludeLimitedTo  = @{ Label = 'Exclude limited to'; Default = 'LEA013D0'; Tip = 'Leave out collections limited to any of these collection IDs. Separate with semicolons.' }
 }
 
@@ -99,6 +99,15 @@ function Import-Settings {
         $saved = Get-Content -Path $SettingsPath -Raw | ConvertFrom-Json
         foreach ($property in $saved.PSObject.Properties) {
             if ($script:SettingBoxes.ContainsKey($property.Name)) { $script:SettingBoxes[$property.Name].Text = [string]$property.Value }
+        }
+        # Settings saved before name suffixes became name patterns: -sec becomes *-sec. The old
+        # entry is dropped from the file at the next Save Settings.
+        $oldSuffixes = $saved.PSObject.Properties['ExcludeNameSuffix']
+        if ($oldSuffixes -and -not $saved.PSObject.Properties['ExcludeName']) {
+            $script:SettingBoxes.ExcludeName.Text = (Split-List ([string]$oldSuffixes.Value) | ForEach-Object {
+                if ($_ -match '[*?]') { $_ } else { "*$_" }
+            }) -join '; '
+            Write-AppLog "Converted saved name suffixes to name patterns: $($script:SettingBoxes.ExcludeName.Text). Save Settings to keep them."
         }
         Write-AppLog "Settings loaded from $SettingsPath"
     }
@@ -155,7 +164,7 @@ function Get-ScriptParameters($State) {
         # A blank site code makes the script detect it from the SMS Provider
         $parameters.SiteCode = $settings.SiteCode
         $parameters.ExcludeFolder = Split-List $settings.ExcludeFolder
-        $parameters.ExcludeNameSuffix = Split-List $settings.ExcludeNameSuffix
+        $parameters.ExcludeName = Split-List $settings.ExcludeName
         $parameters.ExcludeLimitedTo = Split-List $settings.ExcludeLimitedTo
     }
 
@@ -849,7 +858,7 @@ function New-InventoryTab($Definition) {
         [void]$exclusions.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle 'AutoSize'))
         [void]$exclusions.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle 'Percent', 100))
         New-SettingBox $exclusions 'ExcludeFolder' 0 0
-        New-SettingBox $exclusions 'ExcludeNameSuffix' 0 1
+        New-SettingBox $exclusions 'ExcludeName' 0 1
         New-SettingBox $exclusions 'ExcludeLimitedTo' 0 2
         $group.Controls.Add($exclusions)
         $layout.Controls.Add($group, 0, 0)

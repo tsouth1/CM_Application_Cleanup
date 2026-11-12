@@ -215,7 +215,7 @@ $ts | Where-Object { -not $_.Deployments -and -not $_.ParentTaskSequences } | Fo
 
 ## Collection-Inventory.v4.ps1
 
-Inventories every collection through the SMS Provider, with the collections that reference each one (limiting, include, exclude and query rules), deployments by type, membership rules and evaluation settings. Built-in collections and collections matching `-ExcludeFolder`, `-ExcludeNameSuffix` or `-ExcludeLimitedTo` are left out of the report, but their references to other collections still count.
+Inventories every collection through the SMS Provider, with the collections that reference each one (limiting, include, exclude and query rules), deployments by type, membership rules and evaluation settings. Built-in collections and collections matching `-ExcludeFolder`, `-ExcludeName` or `-ExcludeLimitedTo` are left out of the report, but their references to other collections still count.
 
 Written to `-OutputDirectory` (default `.\CollectionInventory`):
 
@@ -224,7 +224,7 @@ Written to `-OutputDirectory` (default `.\CollectionInventory`):
 
 ```powershell
 .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -OutputDirectory C:\Reports\Collections
-.\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeNameSuffix '-sec', '-test' -ExcludeLimitedTo @()
+.\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeName '*-sec', '*Pilot*' -ExcludeLimitedTo @()
 ```
 
 | Parameter | Description |
@@ -233,7 +233,7 @@ Written to `-OutputDirectory` (default `.\CollectionInventory`):
 | `-SiteCode` | Site code (default `LEA`); pass `''` to detect it |
 | `-OutputDirectory` | Folder for the reports (default `.\CollectionInventory`) |
 | `-ExcludeFolder` | Console folder patterns to leave out, `*` as wildcard (default: the Office 365 and Security Patches deployment folders); `@()` turns it off |
-| `-ExcludeNameSuffix` | Name endings to leave out (default `-sec`); `@()` turns it off |
+| `-ExcludeName` | Name patterns to leave out, `*` as wildcard: `*-sec` ends with, `*Pilot*` contains, `Test -*` starts with (default `*-sec`); `@()` turns it off. A pattern without `*` must match the whole name, and `[` `]` are wildcard characters (write a literal `[` as `[[]`) |
 | `-ExcludeLimitedTo` | Limiting collection IDs to leave out (default `LEA013D0`); `@()` turns it off |
 
 Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses.

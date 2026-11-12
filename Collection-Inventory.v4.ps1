@@ -35,7 +35,7 @@
     Exclusions. These collections are left out of the inventory CSV:
       - Built-in collections (IDs starting with SMS).
       - Collections in a console folder matching an -ExcludeFolder pattern.
-      - Collections whose name ends with an -ExcludeNameSuffix value.
+      - Collections whose name matches an -ExcludeName pattern.
       - Collections limited to an -ExcludeLimitedTo collection ID.
     Excluded collections are still read, so their references to other collections count in
     ReferencedBy and the references file. A collection used by an excluded one never looks unused.
@@ -58,9 +58,12 @@
     "\Assets and Compliance\Overview\Device Collections\". Defaults to the Office 365 and
     Security Patches deployment folders. Pass @() to turn this exclusion off.
 
-.PARAMETER ExcludeNameSuffix
-    Leave out collections whose name ends with any of these values (not case-sensitive).
-    Defaults to -sec. Pass @() to turn this exclusion off.
+.PARAMETER ExcludeName
+    Leave out collections whose name matches any of these patterns (not case-sensitive).
+    Use * as a wildcard: "*-sec" matches names ending with -sec, "*Pilot*" names containing
+    Pilot and "Test -*" names starting with "Test -". A pattern without * must match the whole
+    name. [ and ] are wildcard characters too, so a literal bracket must be written as [[] or []].
+    Defaults to *-sec. Pass @() to turn this exclusion off.
 
 .PARAMETER ExcludeLimitedTo
     Leave out collections whose limiting collection is any of these IDs.
@@ -73,7 +76,7 @@
     .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -OutputDirectory C:\Temp\Collections
 
 .EXAMPLE
-    .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeNameSuffix '-sec', '-test' -ExcludeLimitedTo @()
+    .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeName '*-sec', '*Pilot*' -ExcludeLimitedTo @()
 
 .EXAMPLE
     .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeFolder 'Device Collections\Deployment\Pilot*'
@@ -87,7 +90,7 @@ param(
         'Device Collections\Deployment\Software Center Deployments\Office 365*'
         'Device Collections\Deployment\Security Patches*'
     ),
-    [string[]]$ExcludeNameSuffix = @('-sec'),
+    [string[]]$ExcludeName       = @('*-sec'),
     [string[]]$ExcludeLimitedTo  = @('LEA013D0')
 )
 
@@ -198,7 +201,7 @@ try {
         $reason =
             if ($c.CollectionID -like 'SMS*') { 'Built-in' }
             elseif (@($folderPatterns | Where-Object { $path -like $_ }).Count) { 'Folder' }
-            elseif (@($ExcludeNameSuffix | Where-Object { $_ -and $name.EndsWith($_, [StringComparison]::OrdinalIgnoreCase) }).Count) { 'Name suffix' }
+            elseif (@($ExcludeName | Where-Object { $_ -and $name -like $_.Trim() }).Count) { 'Name' }
             elseif ($c.LimitToCollectionID -and $ExcludeLimitedTo -contains $c.LimitToCollectionID) { 'Limiting collection' }
         if ($reason) { $excludedReason[$c.CollectionID] = $reason }
     }
