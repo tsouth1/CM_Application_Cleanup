@@ -199,8 +199,8 @@ function Get-PackageFolders {
             $folders[[int]$row.ContainerNodeID] = [pscustomobject]@{ Name = $row.Name; Parent = [int](Get-DbValue $row.ParentContainerNodeID) }
         }
 
-        # Packages are folder members by PackageID; applications and other objects by a path
-        $members = Invoke-SqlQuery -Query "SELECT InstanceKey, ContainerNodeID FROM vFolderMembers WHERE InstanceKey NOT LIKE '%/%'"
+        # Collections share the PackageID number range, so members are filtered by object type
+        $members = Invoke-SqlQuery -Query "SELECT InstanceKey, ContainerNodeID FROM vFolderMembers WHERE ObjectTypeName LIKE 'SMS[_]%Package'"
     }
     catch {
         Write-Log "Could not read console folders, ObjectPath will be blank: $($_.Exception.Message)" 'WARN'
@@ -223,8 +223,9 @@ function Get-PackageFolders {
 
 function Get-Programs {
     # Returns every program with its settings. DependentProgram, the "Run another program
-    # first" setting, holds <PackageID>;;<ProgramName>.
-    foreach ($row in (Invoke-SqlQuery -Query 'SELECT * FROM v_Program').Rows) {
+    # first" setting, holds <PackageID>;;<ProgramName>. ConfigMgr adds a hidden program named *
+    # to packages, boot images and task sequences for its own use; it is left out.
+    foreach ($row in (Invoke-SqlQuery -Query "SELECT * FROM v_Program WHERE ProgramName <> '*'").Rows) {
         $flags = [long](Get-Column $row 'ProgramFlags')
 
         $runFirstPackageID = $null
@@ -292,10 +293,13 @@ function Get-TaskSequencePackageReferences {
     foreach ($row in $table.Rows) {
         $packageID = Get-DbValue $row[$packageColumn]
         if (-not $packageID) { continue }
+        # Program * means the step uses the package content without running a program
+        $program = if ($programColumn) { [string](Get-DbValue $row[$programColumn]) } else { '' }
+        if ($program -eq '*') { $program = '' }
         [pscustomobject]@{
             TaskSequenceID = $row.PackageID
             PackageID      = $packageID
-            Program        = if ($programColumn) { [string](Get-DbValue $row[$programColumn]) } else { '' }
+            Program        = $program
         }
     }
 }
@@ -393,12 +397,6 @@ foreach ($key in $programDeploymentCounts.Keys) {
 Write-Log 'Reading task sequence package references'
 $taskSequences = Get-TaskSequences
 $directReferences = @(Get-TaskSequencePackageReferences)
-# The boot image is set on the task sequence rather than in a step
-$directReferences += @(foreach ($tsId in $taskSequences.Keys) {
-    if ($taskSequences[$tsId].BootImageID) {
-        [pscustomobject]@{ TaskSequenceID = $tsId; PackageID = $taskSequences[$tsId].BootImageID; Program = '' }
-    }
-})
 
 $directByTs = @{}
 foreach ($reference in $directReferences) {
@@ -406,27 +404,41 @@ foreach ($reference in $directReferences) {
     $directByTs[$reference.TaskSequenceID] += $reference
 }
 
-$references = @(foreach ($reference in $directReferences) {
-    $tsName = if ($taskSequences.ContainsKey($reference.TaskSequenceID)) { $taskSequences[$reference.TaskSequenceID].Name } else { '' }
+# One entry per task sequence, package and program. The reference views already list a child
+# task sequence's packages against the parent; they are added here as well in case a site's view
+# does not, and Via records the child task sequences that reference the package.
+$referenceTable = [ordered]@{}
+function Add-Reference([string]$TaskSequenceID, [string]$PackageID, [string]$Program, [string]$Via) {
+    if ($taskSequences.ContainsKey($PackageID) -or $excludedIds.ContainsKey($PackageID)) { return }
+    $key = "$TaskSequenceID|$PackageID|$Program"
+    if (-not $referenceTable.Contains($key)) {
+        $referenceTable[$key] = [pscustomobject]@{
+            TaskSequenceID   = $TaskSequenceID
+            TaskSequenceName = if ($taskSequences.ContainsKey($TaskSequenceID)) { $taskSequences[$TaskSequenceID].Name } else { '' }
+            PackageID        = $PackageID
+            Program          = $Program
+            Via              = @()
+        }
+    }
+    if ($Via -and $referenceTable[$key].Via -notcontains $Via) { $referenceTable[$key].Via += $Via }
+}
 
+foreach ($reference in $directReferences) {
+    Add-Reference $reference.TaskSequenceID $reference.PackageID $reference.Program ''
     if ($taskSequences.ContainsKey($reference.PackageID)) {
-        # A Run Task Sequence step: list the child's packages against this task sequence too
+        # A Run Task Sequence step: the child's packages are used by this task sequence too
         foreach ($child in @($directByTs[$reference.PackageID] | Where-Object { $_ })) {
-            if ($taskSequences.ContainsKey($child.PackageID) -or $excludedIds.ContainsKey($child.PackageID)) { continue }
-            [pscustomobject]@{
-                TaskSequenceID = $reference.TaskSequenceID; TaskSequenceName = $tsName
-                PackageID = $child.PackageID; Program = [string]$child.Program; Via = $reference.PackageID
-            }
+            Add-Reference $reference.TaskSequenceID $child.PackageID $child.Program $reference.PackageID
         }
     }
-    elseif (-not $excludedIds.ContainsKey($reference.PackageID)) {
-        [pscustomobject]@{
-            TaskSequenceID = $reference.TaskSequenceID; TaskSequenceName = $tsName
-            PackageID = $reference.PackageID; Program = [string]$reference.Program; Via = ''
-        }
-    }
-}) | Sort-Object -Property TaskSequenceName, TaskSequenceID, PackageID, Program, Via -Unique
-$references = @($references)
+}
+# The boot image is set on the task sequence rather than in a step. It is added after the child
+# packages because a child's boot image is not used when it runs from a parent.
+foreach ($tsId in $taskSequences.Keys) {
+    if ($taskSequences[$tsId].BootImageID) { Add-Reference $tsId $taskSequences[$tsId].BootImageID '' '' }
+}
+
+$references = @($referenceTable.Values | Sort-Object -Property TaskSequenceName, TaskSequenceID, PackageID, Program)
 Write-Log "Found $($references.Count) reference(s) in $(@($references | Select-Object -ExpandProperty TaskSequenceID -Unique).Count) task sequence(s)"
 
 $referencesByPackage = @{}
@@ -480,16 +492,21 @@ $packages = foreach ($row in $packageRows) {
         ForEach-Object { Format-ProgramRef $_.RunFirstPackageID $_.RunFirstProgram } | Select-Object -Unique)
     $dependents = @($dependentsByPackage[$id] | Where-Object { $_ -and $_.PackageID -ne $id })
 
+    $sourcePath = Get-Column $row 'PkgSourcePath'
+
     [pscustomobject]@{
         Package               = $name
         PackageID             = $id
         PackageType           = $type
+        # Created and kept up to date by the site: the client install, piloting and upgrade
+        # packages and the Easy Setup package. Not reported as unused.
+        BuiltIn               = $sourcePath -match '\\SMS_[^\\]+\\(Client|StagingClient|ClientUpgrade|PilotingUpgrade)$|\\EasySetupPayload\\'
         ObjectPath            = $objectPath
         Manufacturer          = Get-Column $row 'Manufacturer'
         Version               = Get-Column $row 'Version'
         Language              = Get-Column $row 'Language'
         Description           = Get-Column $row 'Description'
-        SourcePath            = Get-Column $row 'PkgSourcePath'
+        SourcePath            = $sourcePath
         SizeKB                = if ($null -ne $sizes) { $sizes[$id] } else { $null }
         SourceVersion         = Get-Column $row 'SourceVersion'
         SourceDate            = Get-Column $row 'SourceDate'
@@ -519,8 +536,9 @@ $referenceRows = foreach ($reference in $references) {
         # Deployments of the task sequence itself; Deployments below is the package's
         TaskSequenceDeployments = if ($null -eq $tsDeploymentCounts) { $null }
                                   else { [int]$tsDeploymentCounts[$reference.TaskSequenceID] }
-        # The child task sequence holding the step, when the reference comes from a Run Task Sequence step
-        Via                     = if ($reference.Via) { "$($taskSequences[$reference.Via].Name) ($($reference.Via))" } else { '' }
+        # Child task sequences run by this one that reference the package. The package may also
+        # be used by the task sequence's own steps.
+        Via                     = ($reference.Via | ForEach-Object { "$($taskSequences[$_].Name) ($_)" }) -join '; '
         Package                 = if ($package) { $package.Package } else { '(package not found)' }
         PackageID               = $reference.PackageID
         PackageType             = if ($package) { $package.PackageType } else { '' }
@@ -543,10 +561,11 @@ Export-Report -Rows $packages -Path $packageCsv
 Export-Report -Rows @($programRows | Sort-Object -Property PackageType, Package, Program) -Path $programCsv
 Export-Report -Rows $referenceRows -Path $tsCsv
 
-# Boot images are also used for PXE and media without a task sequence reference, so they are
-# not reported as unused
+# Boot images are also used for PXE and media without a task sequence reference, and built-in
+# packages are used by the site itself, so neither is reported as unused
 $notInUse = @($packages | Where-Object {
-    $_.PackageType -ne 'Boot image' -and $_.Deployments -eq 0 -and $_.TaskSequenceCount -eq 0 -and $_.DependentPrograms -eq 0 })
+    $_.PackageType -ne 'Boot image' -and -not $_.BuiltIn -and
+    $_.Deployments -eq 0 -and $_.TaskSequenceCount -eq 0 -and $_.DependentPrograms -eq 0 })
 $missingInTs = @($referenceRows | Where-Object { $_.Package -eq '(package not found)' })
 $missingProgramInTs = @($referenceRows | Where-Object { $_.ProgramFound -eq $false -and $_.Package -ne '(package not found)' })
 $tsBlocked = @($referenceRows | Where-Object { $_.AllowTSInstall -eq $false })
@@ -557,7 +576,7 @@ $brokenChains = @($allPrograms | Where-Object {
 $typeSummary = ($packages | Group-Object -Property PackageType | Sort-Object -Property Name |
     ForEach-Object { "$($_.Count) $($_.Name)" }) -join ', '
 Write-Log "Done. $($packages.Count) package(s): $typeSummary."
-Write-Log "$($notInUse.Count) package(s) have no deployments, task sequence references or dependent programs (boot images not counted)."
+Write-Log "$($notInUse.Count) package(s) have no deployments, task sequence references or dependent programs (boot images and built-in packages not counted)."
 if ($missingInTs.Count) {
     Write-Log "$($missingInTs.Count) task sequence reference(s) point to packages that no longer exist:" 'WARN'
     foreach ($ref in $missingInTs) { Write-Log "  $($ref.TaskSequenceName) ($($ref.TaskSequenceID)) -> $($ref.PackageID)" 'WARN' }

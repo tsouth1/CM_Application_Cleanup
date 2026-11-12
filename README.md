@@ -81,6 +81,7 @@ For each package it reports:
 | Column | Meaning |
 | --- | --- |
 | PackageType | `Package`, `Driver package`, `Operating system image`, `Operating system upgrade package`, `Boot image`, ... |
+| BuiltIn | `True` for packages the site creates and maintains (client install, piloting and upgrade packages, Easy Setup package); these are not flagged as unused |
 | SourcePath | Package source path |
 | SizeKB | Size of the package source in KB, as recorded when the content was last updated |
 | Deployments | Number of deployments of the package's programs (task sequence deployments are not counted) |
@@ -93,7 +94,7 @@ For each package it reports:
 
 It also logs a summary that highlights cleanup candidates and problems:
 
-- Packages with no deployments, no task sequence references and no dependent programs (likely unused). Boot images are not counted, because they are also used for PXE and boot media.
+- Packages with no deployments, no task sequence references and no dependent programs (likely unused). Boot images and built-in packages are not counted, because boot images are also used for PXE and boot media and built-in packages are used by the site.
 - Task sequence references to packages or programs that no longer exist
 - Task sequence references to programs that do not allow task sequence install without a deployment
 - Programs that run another program first that no longer exists
@@ -104,7 +105,7 @@ Written to `-OutputDirectory` (default `.\PackageInventory`):
 
 - `Packages_<timestamp>.csv` - one row per package
 - `Programs_<timestamp>.csv` - one row per program, with command line, disabled state, deployments, the program it runs first and the programs that run it first
-- `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and package pair. `Via` names the child task sequence when the reference comes from a Run Task Sequence step. `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the package
+- `TaskSequenceReferences_<timestamp>.csv` - one row per task sequence and package pair. `Via` names the child task sequences, run by a Run Task Sequence step, that also reference the package; the package may also be used by the parent's own steps. Program is blank when the step uses the package content without running a program (driver packages, OS images, Run Command Line). `TaskSequenceDeployments` is the number of deployments of the task sequence; `Deployments` is the number of deployments of the package
 
 The package rows are also returned on the pipeline. The script stops with an error if it cannot connect to the site database.
 
@@ -123,8 +124,10 @@ Parameters are the same as the application script, without `-LocaleId`.
 
 ### Limitations
 
-- A package used by a child task sequence is listed against both the child and the parent, one level deep. Deeper nesting is not followed.
+- A package used by a child task sequence is listed against both the child and the parent. The reference view already includes nested task sequences; `Via` is worked out one level deep.
 - Task sequence references come from `v_TaskSequenceReferencesInfo` (or `v_TaskSequencePackageReferences` when that view is missing). When the site does not record which program a step runs, the `AllowTSInstall` check is made at package level, so a package used only by a Run Command Line or Download Package Content step can be flagged although it needs no program.
+- When a package is deleted, ConfigMgr removes it from the task sequence reference views, but a step that used it keeps the deleted PackageID and fails at run time. Such steps are not detected; the task sequence XML that holds them is stored in an encoded form in the database.
+- When a package is deleted, ConfigMgr also clears "Run another program first" on programs that ran its programs, so the broken run-first check only finds chains left behind outside the site's control.
 - Packages installed from a dynamic variable list (Install Package step using a base variable name) are not detected as references.
 - Boot images used only for PXE or boot media show no task sequence references.
 - The script is read-only; it does not change or delete anything in ConfigMgr.
