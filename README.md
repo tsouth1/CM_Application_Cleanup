@@ -4,7 +4,7 @@ Tools for finding Configuration Manager (ConfigMgr / MECM) applications, package
 
 | Script | What it does | Reads |
 | --- | --- | --- |
-| `SCCM-MaintenanceApp.ps1` | Windows app that runs the scripts below and shows their reports | |
+| `SCCM-MaintenanceApp.ps1` | Windows app that runs the scripts below and shows their reports; start it with `SCCM-MaintenanceApp.bat` | |
 | `Get-CMApplicationInventory.ps1` | Application inventory | Site database (SQL) |
 | `Get-CMPackageInventory.ps1` | Package inventory: standard, driver, OS image, OS upgrade and boot image packages | Site database (SQL) |
 | `Get-CMTaskSequenceInventory.ps1` | Task sequence inventory | Site database (SQL) |
@@ -32,9 +32,13 @@ Reports are named `<Report>_<yyyyMMdd_HHmm>.csv`. Every script logs lines in the
 
 ## SCCM-MaintenanceApp.ps1
 
+Double-click `SCCM-MaintenanceApp.bat`, or run:
+
 ```powershell
 powershell.exe -ExecutionPolicy Bypass -File .\SCCM-MaintenanceApp.ps1
 ```
+
+The batch file starts the app from the folder it is in, without a console window, so it works wherever the repo is cloned.
 
 **SCCM Maintenance App** has a tab for each inventory (Applications, Packages, Collections, Task Sequences) and a Log tab.
 
