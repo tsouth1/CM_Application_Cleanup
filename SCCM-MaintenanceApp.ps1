@@ -50,7 +50,7 @@ $script:AppTitle = 'SCCM Maintenance App'
 # Collections tab. List settings are separated by semicolons.
 $script:SettingDefinitions = [ordered]@{
     SiteServer        = @{ Label = 'Site server';       Default = '';     Tip = 'Server hosting the SMS Provider. Used by the Collections tab.' }
-    SqlServer         = @{ Label = 'SQL server';        Default = '';     Tip = 'SQL Server hosting the site database, e.g. cmsql01 or cmsql01\INSTANCE. Used by the Applications, Packages and Task Sequences tabs.' }
+    SqlServer         = @{ Label = 'SQL server';        Default = '';     Tip = 'SQL Server hosting the site database, e.g. cmsql01 or cmsql01\INSTANCE. Used by the Applications, Packages and Task Sequences tabs, and by the Collections tab for collection evaluation times.' }
     SiteCode          = @{ Label = 'Site code';         Default = '';     Tip = 'ConfigMgr site code, e.g. PS1.' }
     Database          = @{ Label = 'Site database';     Default = '';     Tip = 'Site database name. Leave blank to use CM_<site code>.' }
     QueryTimeout      = @{ Label = 'Query timeout (s)'; Default = '300';  Tip = 'SQL command timeout in seconds.' }
@@ -75,6 +75,15 @@ $script:TabDefinitions = @(
     @{ Name = 'Task Sequences'; Script = 'Get-CMTaskSequenceInventory.ps1'; Folder = 'TaskSequences'; Kind = 'Sql'; UsesLocale = $true
        Reports = @(@{ Name = 'Task sequences'; Prefix = 'TaskSequences_' }, @{ Name = 'References'; Prefix = 'TaskSequenceReferences_' }) }
 )
+
+# Report columns holding several items in one cell, by the separator the scripts join them with
+# (* is a wildcard). The grid shows each item on a line of its own; the CSVs keep the separator.
+$script:ListColumns = @{
+    '; '  = 'ContentLocation', 'ContentLocations', 'DeploymentTypes', 'TaskSequences', 'Programs', 'Program', 'RunsFirst',
+            'DependentProgramNames', 'Via', 'DeployedTo', 'ParentTaskSequences', 'ChildTaskSequences', 'Packages',
+            'Applications', 'RetiredApplications'
+    ' | ' = 'IncludeCollections', 'ExcludeCollections', 'QueryRules', 'ReferencedBy-*', 'Deployments - *'
+}
 
 $script:DeleteScript = 'Delete-MarkedCollections.ps1'
 $script:RestoreScript = 'Restore-DeletedCollections.ps1'
@@ -179,6 +188,14 @@ function Get-ScriptParameters($State) {
         $parameters.ExcludeFolder = Split-List $settings.ExcludeFolder
         $parameters.ExcludeName = Split-List $settings.ExcludeName
         $parameters.ExcludeLimitedTo = Split-List $settings.ExcludeLimitedTo
+        # The SQL server is optional here; it adds the collections' evaluation run times
+        if ($settings.SqlServer) {
+            $parameters.SqlServer = $settings.SqlServer
+            if ($settings.Database) { $parameters.Database = $settings.Database }
+            $timeout = 0
+            if (-not [int]::TryParse($settings.QueryTimeout, [ref]$timeout) -or $timeout -lt 1) { $missing += 'Query timeout (a whole number of seconds)' }
+            $parameters.QueryTimeout = $timeout
+        }
     }
 
     if ($missing.Count) {
@@ -492,12 +509,23 @@ function Set-GridColumns($State) {
 
     $editable = ($State.Definition.Name -eq 'Collections') -and $table.Columns.Contains($script:MarkColumn)
     $grid.ReadOnly = -not $editable
+    $State.ListColumns = @{}
     foreach ($column in $grid.Columns) {
+        $name = $column.DataPropertyName
         $column.SortMode = 'Automatic'
-        $column.ReadOnly = -not ($editable -and $column.DataPropertyName -eq $script:MarkColumn)
+        $column.ReadOnly = -not ($editable -and $name -eq $script:MarkColumn)
         $column.HeaderCell.Style.BackColor = [System.Drawing.Color]::Empty
-        if ($table.Columns[$column.DataPropertyName].DataType -eq [datetime]) { $column.DefaultCellStyle.Format = 'yyyy-MM-dd HH:mm' }
-        if ($table.Columns[$column.DataPropertyName].DataType -eq [long]) { $column.DefaultCellStyle.Alignment = 'MiddleRight' }
+        if ($table.Columns[$name].DataType -eq [datetime]) { $column.DefaultCellStyle.Format = 'yyyy-MM-dd HH:mm' }
+        if ($table.Columns[$name].DataType -eq [long]) { $column.DefaultCellStyle.Alignment = 'TopRight' }
+        if ($table.Columns[$name].DataType -eq [string]) {
+            foreach ($separator in $script:ListColumns.Keys) {
+                if (@($script:ListColumns[$separator] | Where-Object { $name -like $_ }).Count) {
+                    # The CellFormatting handler puts each item on its own line
+                    $State.ListColumns[$name] = $separator
+                    $column.DefaultCellStyle.WrapMode = 'True'
+                }
+            }
+        }
     }
     if ($editable) {
         $markColumn = $grid.Columns | Where-Object { $_.DataPropertyName -eq $script:MarkColumn } | Select-Object -First 1
@@ -1111,6 +1139,9 @@ function New-InventoryTab($Definition) {
     $grid.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(245, 247, 250)
     $grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.SystemColors]::Control
     $grid.ColumnHeadersHeightSizeMode = 'AutoSize'
+    # Rows grow to fit list cells, which show one item per line; other cells line up at the top
+    $grid.DefaultCellStyle.Alignment = 'TopLeft'
+    $grid.AutoSizeRowsMode = 'DisplayedCells'
     # Double buffering stops the grid flickering while scrolling large reports
     $grid.GetType().GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic').SetValue($grid, $true, $null)
     $state.Grid = $grid
@@ -1156,6 +1187,17 @@ function New-InventoryTab($Definition) {
     # Columns are moved by dragging their header (AllowUserToOrderColumns)
     $grid.Add_ColumnDisplayIndexChanged({ Invoke-UiAction { Save-ColumnOrder $script:TabStates[$this.Tag] } })
     $grid.Add_DataError({ $_.ThrowException = $false })
+    # List cells are shown one item per line; the table, filters and exports keep the separator
+    $grid.Add_CellFormatting({
+        if ($_.Value -isnot [string]) { return }
+        $listColumns = $script:TabStates[$this.Tag].ListColumns
+        if (-not $listColumns) { return }
+        $separator = $listColumns[$this.Columns[$_.ColumnIndex].DataPropertyName]
+        if ($separator) {
+            $_.Value = $_.Value.Replace($separator, "`n")
+            $_.FormattingApplied = $true
+        }
+    })
     # Shift + mouse wheel scrolls sideways through the columns, as in Excel
     $grid.Add_MouseWheel({
         if ([System.Windows.Forms.Control]::ModifierKeys -band [System.Windows.Forms.Keys]::Shift) {

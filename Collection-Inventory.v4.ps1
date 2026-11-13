@@ -12,6 +12,7 @@
                                              collection, include/exclude rules, query rules,
                                              direct rule count, deployments (one column per
                                              deployment type), refresh (evaluation) settings,
+                                             last full evaluation run time (with -SqlServer),
                                              audit timestamps and comment.
     2. CollectionReferences_<timestamp>.csv  one row per reference: source collection, reference
                                              type (Limiting / Include / Exclude / Query), and
@@ -27,6 +28,11 @@
     Deployments come from SMS_DeploymentSummary (applications, packages, updates, baselines,
     task sequences, ...) plus client settings and antimalware policy deployments, which are
     stored separately in SMS_ClientSettingsAssignment. DeploymentCount is the total of all of them.
+
+    LastFullEvaluationMs is how long the collection's last full evaluation took, in
+    milliseconds, as shown by Collection Evaluation Viewer. ConfigMgr keeps only the last run,
+    in the site database (Collections_L), not in the SMS Provider, so it is read only when
+    -SqlServer is given and is blank otherwise. Sort by it to find the slowest queries.
 
     Multi-value cells are separated by " | ". Each referenced collection is written
     as "Name (ID)". ObjectPath is the collection's folder in the console, for example
@@ -50,6 +56,16 @@
 
 .PARAMETER OutputDirectory
     Folder for reports. Defaults to .\CollectionInventory
+
+.PARAMETER SqlServer
+    SQL Server hosting the site database, e.g. cmsql01 or cmsql01\INSTANCE. Optional; used only
+    to read LastFullEvaluationMs. Needs read access with Windows authentication.
+
+.PARAMETER Database
+    Site database name. Defaults to CM_<SiteCode>.
+
+.PARAMETER QueryTimeout
+    SQL command timeout in seconds. Defaults to 300.
 
 .PARAMETER ExcludeFolder
     Leave out collections in console folders matching any of these patterns (not case-sensitive).
@@ -91,7 +107,10 @@ param(
         'Device Collections\Deployment\Security Patches*'
     ),
     [string[]]$ExcludeName       = @('*-sec'),
-    [string[]]$ExcludeLimitedTo  = @('LEA013D0')
+    [string[]]$ExcludeLimitedTo  = @('LEA013D0'),
+    [string]$SqlServer,
+    [string]$Database,
+    [int]$QueryTimeout = 300
 )
 
 $ErrorActionPreference = 'Stop'
@@ -155,6 +174,38 @@ $RefreshTypes = @{
     6 = 'Scheduled (full) + Incremental'
 }
 
+function Get-EvaluationTimes {
+    # Collection ID -> milliseconds the last full evaluation took, from the site database. The
+    # SMS Provider does not expose evaluation run times. A failure is logged and leaves the
+    # column blank rather than stopping the inventory.
+    $times = @{}
+    $builder = New-Object System.Data.SqlClient.SqlConnectionStringBuilder
+    $builder['Data Source'] = $SqlServer
+    $builder['Initial Catalog'] = $Database
+    $builder['Integrated Security'] = $true
+    $builder['Application Name'] = 'Collection-Inventory'
+    $connection = New-Object System.Data.SqlClient.SqlConnection $builder.ConnectionString
+    try {
+        $command = $connection.CreateCommand()
+        $command.CommandText = 'SELECT g.SiteID, l.EvaluationLength FROM Collections_L l JOIN Collections_G g ON g.CollectionID = l.CollectionID'
+        $command.CommandTimeout = $QueryTimeout
+        $table = New-Object System.Data.DataTable
+        [void](New-Object System.Data.SqlClient.SqlDataAdapter $command).Fill($table)
+        foreach ($row in $table.Rows) {
+            if ($row.EvaluationLength -is [DBNull]) { continue }
+            # A hierarchy can hold a row per site; the longest is kept
+            $ms = [long]$row.EvaluationLength
+            if (-not $times.ContainsKey($row.SiteID) -or $times[$row.SiteID] -lt $ms) { $times[$row.SiteID] = $ms }
+        }
+        Write-Log "Read evaluation times for $($times.Count) collection(s)"
+    }
+    catch {
+        Write-Log "Could not read evaluation times from $Database on $SqlServer, LastFullEvaluationMs will be blank: $($_.Exception.GetBaseException().Message)" 'WARN'
+    }
+    finally { $connection.Dispose() }
+    return $times
+}
+
 # DCOM is what the CM console uses, so it works wherever the console can connect.
 Write-Log "Connecting to the SMS Provider on $SiteServer"
 $session = New-CimSession -ComputerName $SiteServer -SessionOption (New-CimSessionOption -Protocol Dcom)
@@ -173,6 +224,14 @@ try {
 
     $collections = @(Get-CimInstance -CimSession $session -Namespace $namespace -ClassName SMS_Collection)
     Write-Log "Found $($collections.Count) collection(s)"
+
+    $evaluationMs = @{}
+    if ($SqlServer) {
+        if (-not $Database) { $Database = "CM_$SiteCode" }
+        Write-Log "Reading collection evaluation times from $Database on $SqlServer"
+        $evaluationMs = Get-EvaluationTimes
+    }
+    else { Write-Log 'No -SqlServer given, LastFullEvaluationMs will be blank' }
 
     $namesById = @{}
     foreach ($c in $collections) { $namesById[$c.CollectionID] = $c.Name }
@@ -331,6 +390,7 @@ try {
         $row.EvaluationMode       = $refreshName
         $row.IsIncremental        = (([int]$c.RefreshType) -band 4) -eq 4
         $row.LastRefreshTime      = $c.LastRefreshTime
+        $row.LastFullEvaluationMs = $evaluationMs[$c.CollectionID]
         $row.LastMemberChangeTime = $c.LastMemberChangeTime
         $row.LastChangeTime       = $c.LastChangeTime
         $row.Comment              = $c.Comment

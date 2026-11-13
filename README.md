@@ -20,12 +20,12 @@ Every script uses the same parameter names for the same settings and takes the o
 
 | Parameter | Meaning | Applications | Packages | Task sequences | Collections | Delete |
 | --- | --- | :-: | :-: | :-: | :-: | :-: |
-| `-SqlServer` | SQL Server hosting the site database, e.g. `cmsql01` or `cmsql01\INSTANCE` | ✓ | ✓ | ✓ | | |
-| `-Database` | Site database name; defaults to `CM_<SiteCode>` | ✓ | ✓ | ✓ | | |
+| `-SqlServer` | SQL Server hosting the site database, e.g. `cmsql01` or `cmsql01\INSTANCE` | ✓ | ✓ | ✓ | optional | |
+| `-Database` | Site database name; defaults to `CM_<SiteCode>` | ✓ | ✓ | ✓ | optional | |
 | `-SiteServer` | Server hosting the SMS Provider | | | | ✓ | ✓ |
 | `-SiteCode` | Site code | ✓ | ✓ | ✓ | ✓ | ✓ |
 | `-OutputDirectory` | Folder for the reports (and, for Delete, the deletion log and backups) | ✓ | ✓ | ✓ | ✓ | ✓ |
-| `-QueryTimeout` | SQL command timeout in seconds (default `300`) | ✓ | ✓ | ✓ | | |
+| `-QueryTimeout` | SQL command timeout in seconds (default `300`) | ✓ | ✓ | ✓ | optional | |
 | `-LocaleId` | Locale for application names (default `1033`) | ✓ | | ✓ | | |
 
 Reports are named `<Report>_<yyyyMMdd_HHmm>.csv`. Every script logs lines in the form `[HH:mm:ss] [LEVEL] message`, returns its main report rows on the pipeline, and writes an empty file for a report with no rows so every path in the log exists. The SQL scripts stop with an error if they cannot connect to the site database.
@@ -47,6 +47,7 @@ The batch file starts the app from the folder it is in, without a console window
 - **Open Output Folder** opens the tab's report folder. Reports go to a subfolder per tab under the output folder: `Applications`, `Packages`, `Collections`, `TaskSequences`.
 - **Report** picks which of the tab's reports to show; the latest file of that kind in the folder is loaded. **Open CSV...** shows any other report file.
 - The grid sorts when you click a column header. Right-click a header for an Excel-style filter: sort buttons, a checklist of the values (with its own search box and Select All) and Clear Filter. Filtered columns are highlighted and marked ▼. **Search** filters rows containing the text in any column. Numbers and dates sort and filter as numbers and dates.
+- Cells that list several items, such as an application's `TaskSequences` or a collection's `IncludeCollections`, show one item per line, and rows grow to fit them. The CSV files and exports keep the items on one line, separated by `; ` (or ` | ` in the collection reports).
 - Drag a column header to move the column. The order is kept for each kind of report (e.g. the Applications report) and is saved by **Save Settings**, so it is used the next time the app opens. **Reset Columns** puts the report's columns back in the script's order. Shift + mouse wheel scrolls the grid sideways.
 - **Export Filtered Report** saves the rows and columns shown, in the order shown, to a new CSV. **Clear Filters** removes all filters and the search text.
 - The **Log** tab shows every script's output, with warnings in orange and errors in red. It is also appended to `SCCM-MaintenanceApp_<yyyyMMdd>.log` in the output folder.
@@ -60,6 +61,46 @@ To delete collections from the Collections tab:
 **Restore Collections...** lists the collections in the Collections folder's `DeletionLog.csv` that have a MOF backup, newest first, with any already restored shown in grey with their new ID. Tick the ones to restore (or **Browse for MOF...** to add backups from elsewhere), click **Restore Selected** and confirm; `Restore-DeletedCollections.ps1` runs in the background and its log is shown in the Log tab.
 
 Requirements: Windows PowerShell 5.1, and the access each script needs (below). The scripts must be in the same folder as the app.
+
+### Screenshots
+
+The screenshots use sample data from a fictional site. In some of them the columns have been dragged so the list columns are in view.
+
+**Applications tab.** Lists of task sequences, deployment types and content locations show one item per line.
+
+![Applications tab](docs/screenshots/applications.png)
+
+**Packages tab**, with each package's programs, the task sequences that use it and the programs that run it first.
+
+![Packages tab](docs/screenshots/packages.png)
+
+**Collections tab.** The collection exclusions are at the top and the deletion and restore buttons are in the toolbar. Collections marked `Y` in the green `to be deleted` column are deleted by **Delete Marked Collections**.
+
+![Collections tab](docs/screenshots/collections.png)
+
+**Finding slow collection evaluations.** Here the Collections report is sorted by `LastFullEvaluationMs`, largest first, with that column dragged next to the name. The slowest collections and their query rules are at the top.
+
+![Collections sorted by evaluation time](docs/screenshots/collections-evaluation.png)
+
+**Task Sequences tab**, with each task sequence's deployments, packages, applications (retired ones listed separately) and child task sequences.
+
+![Task Sequences tab](docs/screenshots/task-sequences.png)
+
+**Column filter.** Right-click a column header to open it.
+
+![Column filter](docs/screenshots/column-filter.png)
+
+**A filtered report.** `Status` is filtered to Active (highlighted, marked ▼) and the search box shows the rows that mention Windows 11. The row count shows 4 of 9 rows.
+
+![Filtered report](docs/screenshots/filtered.png)
+
+**Log tab** after a collection inventory and a deletion preview. Warnings are in orange.
+
+![Log tab](docs/screenshots/log.png)
+
+**Restore Collections.** Deleted collections with a MOF backup are listed. Ones already restored are greyed out and show their new ID.
+
+![Restore Collections dialog](docs/screenshots/restore.png)
 
 ## Get-CMApplicationInventory.ps1
 
@@ -231,6 +272,8 @@ Written to `-OutputDirectory` (default `.\CollectionInventory`):
 - `Collections_<timestamp>.csv` - one row per collection, starting with an empty `to be deleted` column for marking collections for `Delete-MarkedCollections.ps1`
 - `CollectionReferences_<timestamp>.csv` - one row per reference between two collections
 
+`LastFullEvaluationMs` is how long each collection's last full evaluation took, in milliseconds, as shown by Collection Evaluation Viewer. Sort it largest first to find the collections with the slowest queries. ConfigMgr keeps only the last run, and only in the site database (`Collections_L`), so it is filled in only when `-SqlServer` is given (in the app: when the SQL server setting is filled in). If the database cannot be read, a warning is logged and the column is left blank.
+
 ```powershell
 .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -OutputDirectory C:\Reports\Collections
 .\Collection-Inventory.v4.ps1 -SiteServer CM01 -SiteCode PS1 -ExcludeName '*-sec', '*Pilot*' -ExcludeLimitedTo @()
@@ -244,8 +287,11 @@ Written to `-OutputDirectory` (default `.\CollectionInventory`):
 | `-ExcludeFolder` | Console folder patterns to leave out, `*` as wildcard (default: the Office 365 and Security Patches deployment folders); `@()` turns it off |
 | `-ExcludeName` | Name patterns to leave out, `*` as wildcard: `*-sec` ends with, `*Pilot*` contains, `Test -*` starts with (default `*-sec`); `@()` turns it off. A pattern without `*` must match the whole name, and `[` `]` are wildcard characters (write a literal `[` as `[[]`) |
 | `-ExcludeLimitedTo` | Limiting collection IDs to leave out (default `LEA013D0`); `@()` turns it off |
+| `-SqlServer` | SQL Server hosting the site database; optional, used only for `LastFullEvaluationMs` |
+| `-Database` | Site database name (default `CM_<SiteCode>`) |
+| `-QueryTimeout` | SQL command timeout in seconds (default `300`) |
 
-Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses.
+Requires access to the SMS Provider over DCOM, as the ConfigMgr console uses, and for `LastFullEvaluationMs` read access to the site database with Windows authentication.
 
 ## Delete-MarkedCollections.ps1
 
